@@ -1,0 +1,25 @@
+# Internal Git Metadata
+.git
+.gitignore
+.gitattributes
+
+# Dependencies & Local Data
+node_modules
+.env
+data
+*.log
+
+# Build & Documentation Artifacts (Not needed at runtime)
+Dockerfile
+docker-compose.yml
+README.md
+LICENSE
+assets/screenshots
+
+# Desktop build outputs — the server image needs neither. src-tauri carries a
+# multi-gigabyte Rust target directory that would otherwise be sent as build
+# context on every build.
+dist
+src-tauri
+scripts
+docs

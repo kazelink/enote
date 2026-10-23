@@ -1,0 +1,11 @@
+# Global default line ending to avoid CRLF issues in Linux containers
+* text=auto eol=lf
+
+# Force binary files to be treated as binary
+*.woff2 binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.svg binary

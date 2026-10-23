@@ -1,0 +1,21 @@
+{
+  "name": "enote",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node apps/server/server.js",
+    "build:dist": "node scripts/build-web.mjs",
+    "build:desktop": "tauri build --config src-tauri/tauri.conf.json"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.11.1",
+    "better-sqlite3": "^11.5.0",
+    "hono": "^4.4.0",
+    "node-cron": "^3.0.3",
+    "sanitize-html": "^2.11.0"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.12.4"
+  }
+}

@@ -1,0 +1,30 @@
+[package]
+name = "enote"
+version = "1.0.0"
+description = "eNote desktop"
+authors = ["enote"]
+edition = "2021"
+rust-version = "1.77"
+
+[lib]
+name = "enote_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+# `codegen-units = 1` + `lto = true` produce the smallest binary but serialize
+# the whole build and add a multi-minute LTO pass on every link. The app is I/O
+# bound, so parallel codegen with thin LTO is a much better trade: far faster
+# rebuilds for a marginally larger exe.
+codegen-units = 16
+lto = "thin"
+opt-level = "s"
+panic = "abort"
+strip = true
