@@ -29,8 +29,6 @@ export const Auth = {
             }
         });
 
-        // Server returns nonce + JWT as data-* attributes on the swapped <div class="auth-ok">.
-        // Trigger fires after swap (HX-Trigger-After-Swap), so the element is already in the DOM.
         document.body.addEventListener('loginSuccess', async () => {
             const okEl = Utils.$('auth-messages')?.querySelector('.auth-ok');
             if (okEl?.dataset?.nonce) Nonce.set(okEl.dataset.nonce);
@@ -42,10 +40,6 @@ export const Auth = {
             if (msg) msg.innerHTML = '';
             UI.hideAuth();
 
-            // First login lands here, not in App.init's "already authenticated"
-            // branch, so the sync engine has to be started explicitly —
-            // otherwise the local store is never created and nothing works
-            // offline.
             window.App?._startLocalSync?.();
 
             if (Utils.$('editor-wrapper-dom')?.style.display === 'none') await window.App?.loadView();

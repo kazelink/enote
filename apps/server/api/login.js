@@ -36,7 +36,6 @@ function clearLimit(ip) {
   loginLimits.delete(ip);
 }
 
-// Hash both sides first (removes length leakage), then constant-time compare.
 function passwordMatches(a, b) {
   const hashA = crypto.createHash('sha256').update(a).digest();
   const hashB = crypto.createHash('sha256').update(b).digest();
@@ -50,8 +49,6 @@ function lockedResponse(c, lockedUntil, now) {
 }
 
 router.post('/', async (c) => {
-  // Behind Cloudflare Tunnel, CF-Connecting-IP is set by the edge and cannot be
-  // spoofed by the client, unlike X-Forwarded-For.
   const ip = c.req.header('CF-Connecting-IP')
     || c.req.header('X-Real-IP')
     || c.req.header('X-Forwarded-For')?.split(',')[0]?.trim()
@@ -95,7 +92,7 @@ router.post('/', async (c) => {
     const nonce = [...nonceBytes].map(b => b.toString(16).padStart(2, '0')).join('');
 
     const token = await signToken(process.env.JWT_SECRET, nonce);
-    
+
     await ensureSchema().catch(err => console.error('ensureSchema error after login:', err));
 
     const forwardedProto = (c.req.header('x-forwarded-proto') || '').split(',')[0].trim().toLowerCase();

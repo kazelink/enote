@@ -13,10 +13,7 @@ class LocalDatabase {
         }
         this.db = new Database(dbPath);
         this.db.pragma('journal_mode = WAL');
-        // NORMAL is the recommended pairing with WAL: far fewer fsyncs on save,
-        // still crash-safe (worst case loses the last transaction, no corruption).
         this.db.pragma('synchronous = NORMAL');
-        // Make note_media's ON DELETE CASCADE actually fire (SQLite default is OFF).
         this.db.pragma('foreign_keys = ON');
         this._stmtCache = new Map();
     }
@@ -126,7 +123,6 @@ class LocalPreparedStatement {
     }
 }
 
-// Canonical MIME↔extension mapping, shared with the upload route.
 export const MIME_EXT = {
     'image/jpeg': 'jpg',
     'image/png': 'png',
@@ -160,8 +156,6 @@ class LocalStorage {
         return path.join(this.baseDir, safeKey);
     }
 
-    // Callers only ever pass a File (multipart upload) or a node stream
-    // (validated raw upload); anything else is a programming error.
     async put(key, body) {
         const filePath = this._getFilePath(key);
         const dir = path.dirname(filePath);
@@ -221,14 +215,11 @@ class LocalStorage {
 
         try {
             for await (const entry of handle) {
-                // Skip .meta.json files (legacy cleanup)
                 if (entry.name.endsWith('.meta.json')) {
-                    // Optionally delete stale .meta.json files on iteration
                     try {
                         const metaPath = path.join(dir, entry.name);
                         fs.unlinkSync(metaPath);
                     } catch {
-                        // Ignore cleanup errors
                     }
                     continue;
                 }
@@ -262,15 +253,12 @@ class LocalStorage {
         if (fs.existsSync(filePath)) {
             fs.unlinkSync(filePath);
         }
-        // No .meta.json to delete
     }
 
     has(key) {
         return fs.existsSync(this._getFilePath(key));
     }
 
-    // Same-volume move: atomic and O(1) regardless of file size, unlike a
-    // stream copy. Returns null when the source does not exist.
     async move(fromKey, toKey) {
         const fromPath = this._getFilePath(fromKey);
         if (!fs.existsSync(fromPath)) return null;
@@ -294,3 +282,4 @@ export const bucket = new LocalStorage(STORAGE_PATH);
 export function runBackground(promise) {
     Promise.resolve(promise).catch(e => console.error("Unhandled background task error:", e));
 }
+

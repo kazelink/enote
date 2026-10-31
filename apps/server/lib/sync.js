@@ -1,20 +1,3 @@
-/**
- * Sync layer schema.
- *
- * Design notes:
- * - We do NOT touch the existing `notes` / `folders` tables. `notes.updated_at`
- *   already carries business meaning (the user-chosen note date, day precision),
- *   so it cannot double as a revision counter.
- * - Instead every write is appended to `sync_changes`, an append-only change
- *   stream. Its AUTOINCREMENT `seq` is a strictly monotonic, global cursor:
- *   it totally orders all writes and never collides across clients.
- * - Triggers keep the stream complete without editing any existing write path
- *   (save / delete / folders / tags / backup all write through SQL directly).
- *   The triggers only INSERT into a separate table, never UPDATE the row, so
- *   there is no trigger recursion and no behavioural change to current code.
- * - Folders are a projection of notes and are rarely very numerous, so clients
- *   rebuild them from notes and only fetch the (small) folder list in full.
- */
 import { db } from './core.js';
 
 const NOW_SQL = `strftime('%Y-%m-%dT%H:%M:%fZ','now')`;
@@ -34,8 +17,6 @@ const CHANGE_INDEXES = [
   'CREATE INDEX IF NOT EXISTS idx_sync_changes_seq ON sync_changes(seq);'
 ];
 
-// One INSERT-only trigger per (table, operation). `NEW.id` is used for updates
-// because a note's id never changes.
 const TRIGGERS = [
   `
   CREATE TRIGGER IF NOT EXISTS sync_notes_ai AFTER INSERT ON notes
@@ -94,9 +75,6 @@ async function applySyncSchema() {
     await db.prepare(sql).run();
   }
 
-  // Backfill: a database created before this layer existed has notes but no
-  // change rows, so a fresh client would pull nothing. Seed one row per note
-  // only when the stream is still empty.
   const empty = await db.prepare('SELECT 1 AS x FROM sync_changes LIMIT 1').first();
   if (!empty) {
     await db.prepare(`
@@ -106,9 +84,6 @@ async function applySyncSchema() {
   }
 }
 
-/**
- * Idempotent. Safe to call on every startup; resolved once per process.
- */
 export async function ensureSyncSchema() {
   if (syncSchemaReady) return syncSchemaReady;
 
@@ -120,10 +95,6 @@ export async function ensureSyncSchema() {
   return syncSchemaReady;
 }
 
-/**
- * Current global cursor value. Clients compare this against their stored
- * cursor to decide whether a pull is needed at all.
- */
 export async function getLatestSeq() {
   const row = await db.prepare(
     'SELECT COALESCE(MAX(seq), 0) AS seq FROM sync_changes'
@@ -131,10 +102,6 @@ export async function getLatestSeq() {
   return Number(row?.seq || 0);
 }
 
-/**
- * Latest seq per note id, for optimistic-concurrency checks on push.
- * Returns a Map<noteId, seq>; ids with no change rows map to 0.
- */
 export async function getLatestSeqByNoteIds(ids) {
   const map = new Map();
   if (!ids.length) return map;
@@ -153,14 +120,17 @@ export async function getLatestSeqByNoteIds(ids) {
   return map;
 }
 
-/**
- * Resolve the change window into the minimal set of "current state" entries.
- *
- * A note can be written many times inside one window; only its newest change
- * matters, because the client applies whole records rather than deltas. The
- * inner GROUP BY collapses those repeats, and the join recovers the op that
- * belongs to the winning (largest) seq.
- */
+export async function pruneSyncChanges({ retainDays = 30 } = {}) {
+  const cutoff = new Date(Date.now() - retainDays * 24 * 60 * 60 * 1000).toISOString();
+  await db.prepare('DELETE FROM sync_changes WHERE changed_at < ?').bind(cutoff).run();
+  return { cutoff };
+}
+
+export async function getMinSeq() {
+  const row = await db.prepare('SELECT MIN(seq) AS seq FROM sync_changes').first();
+  return Number(row?.seq) || 0;
+}
+
 export async function listChangesSince(since, limit) {
   const { results } = await db.prepare(`
     WITH latest AS (
@@ -180,11 +150,6 @@ export async function listChangesSince(since, limit) {
   return results || [];
 }
 
-/**
- * Note rows for a set of ids, keyed by id. Missing ids mean the row was
- * physically deleted after its last upsert (delete.js does a hard DELETE), so
- * callers must treat "absent" as a deletion rather than silently skipping.
- */
 export async function getNotesByIds(ids) {
   const map = new Map();
   if (!ids.length) return map;
@@ -206,3 +171,4 @@ export async function listAllFolders() {
   ).all();
   return results || [];
 }
+

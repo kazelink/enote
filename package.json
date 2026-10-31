@@ -6,7 +6,8 @@
   "scripts": {
     "start": "node apps/server/server.js",
     "build:dist": "node scripts/build-web.mjs",
-    "build:desktop": "tauri build --config src-tauri/tauri.conf.json"
+    "build:desktop": "tauri build --config src-tauri/tauri.conf.json",
+    "dist:check": "node scripts/check-dist.mjs"
   },
   "dependencies": {
     "@hono/node-server": "^1.11.1",

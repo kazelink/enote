@@ -1,16 +1,3 @@
-/**
- * Local-first storage for the browser / desktop shell.
- *
- * IndexedDB is used because the exact same code runs in a normal browser, in
- * the Tauri WebView and in a Capacitor WebView — no native module, no second
- * implementation to maintain. That is what keeps the desktop and mobile
- * clients on one code path.
- *
- * Record shape mirrors the server API one-for-one (id/title/category/
- * subcategory/tags/content/createdAt/updatedAt) plus internal sync fields
- * prefixed with an underscore, which are stripped before pushing.
- */
-
 const DB_NAME = 'enote';
 const DB_VERSION = 1;
 
@@ -59,13 +46,6 @@ function openDB() {
     return dbPromise;
 }
 
-/**
- * Run `fn` inside a transaction and resolve when the transaction commits.
- *
- * `fn` MUST be synchronous (kick off requests, return the ones you need). An
- * IndexedDB transaction auto-commits as soon as control returns to the event
- * loop, so awaiting inside it would silently lose writes.
- */
 async function withStore(storeName, mode, fn) {
     const db = await openDB();
 
@@ -87,32 +67,20 @@ async function withStore(storeName, mode, fn) {
     });
 }
 
-function readAll(store) {
+async function withRead(storeName, start) {
+    const db = await openDB();
+
     return new Promise((resolve, reject) => {
-        const req = store.getAll();
-        req.onsuccess = () => resolve(req.result || []);
+        const tx = db.transaction(storeName, 'readonly');
+        const req = start(tx.objectStore(storeName));
+        req.onsuccess = () => resolve(req.result);
         req.onerror = () => reject(req.error);
     });
 }
-
-function readOne(store, key) {
-    return new Promise((resolve, reject) => {
-        const req = store.get(key);
-        req.onsuccess = () => resolve(req.result || null);
-        req.onerror = () => reject(req.error);
-    });
-}
-
-/* ------------------------------------------------------------------ meta */
 
 export async function readMeta(key, fallback = null) {
-    const db = await openDB();
-    return new Promise((resolve, reject) => {
-        const tx = db.transaction(STORE_META, 'readonly');
-        const req = tx.objectStore(STORE_META).get(key);
-        req.onsuccess = () => resolve(req.result ? req.result.value : fallback);
-        req.onerror = () => reject(req.error);
-    });
+    const row = await withRead(STORE_META, (store) => store.get(key));
+    return row ? row.value : fallback;
 }
 
 export async function writeMeta(key, value) {
@@ -126,8 +94,6 @@ export async function getCursor() {
 export async function setCursor(seq) {
     return writeMeta('lastSeq', Number(seq) || 0);
 }
-
-/* ----------------------------------------------------------------- notes */
 
 export function toLocalNote(note, { dirty = 1, baseSeq = 0, deleted = 0 } = {}) {
     return {
@@ -145,7 +111,6 @@ export function toLocalNote(note, { dirty = 1, baseSeq = 0, deleted = 0 } = {}) 
     };
 }
 
-/** Strip internal fields before sending a record to the server. */
 export function toRemoteNote(note) {
     return {
         id: note.id,
@@ -166,22 +131,10 @@ export async function putNote(note, options) {
 }
 
 export async function getNote(id) {
-    const db = await openDB();
-    return new Promise((resolve, reject) => {
-        const tx = db.transaction(STORE_NOTES, 'readonly');
-        const req = tx.objectStore(STORE_NOTES).get(id);
-        req.onsuccess = () => {
-            const row = req.result || null;
-            resolve(row && !row._deleted ? row : null);
-        };
-        req.onerror = () => reject(req.error);
-    });
+    const row = await withRead(STORE_NOTES, (store) => store.get(id));
+    return row && !row._deleted ? row : null;
 }
 
-/**
- * Soft delete. The tombstone must survive until the deletion has been pushed,
- * otherwise a pull would resurrect the note from the server.
- */
 export async function tombstoneNote(id) {
     const existing = await getNote(id);
     if (!existing) return;
@@ -191,70 +144,81 @@ export async function tombstoneNote(id) {
     );
 }
 
-/** Remove a row for good, after the server has acknowledged the delete. */
-export async function purgeNote(id) {
-    return withStore(STORE_NOTES, 'readwrite', (store) => store.delete(id));
+export async function allNotes() {
+    return (await withRead(STORE_NOTES, (store) => store.getAll())) || [];
 }
 
-export async function allNotes() {
-    const db = await openDB();
-    return new Promise((resolve, reject) => {
-        const tx = db.transaction(STORE_NOTES, 'readonly');
-        readAll(tx.objectStore(STORE_NOTES)).then(resolve, reject);
-    });
+export async function restoreFromServer(note, seq) {
+    return withStore(STORE_NOTES, 'readwrite', (store) =>
+        store.put(toLocalNote(note, { dirty: 0, baseSeq: seq, deleted: 0 }))
+    );
 }
 
 export async function pendingChanges() {
-    const rows = await allNotes();
+    const rows = (await withRead(STORE_NOTES, (store) => store.index('_dirty').getAll(1))) || [];
     return {
-        notes: rows.filter((r) => !r._deleted && r._dirty),
-        deletions: rows.filter((r) => r._deleted && r._dirty)
+        notes: rows.filter((r) => !r._deleted),
+        deletions: rows.filter((r) => r._deleted)
     };
 }
 
-export async function markSynced(notes, deletions, seq) {
+export async function markSynced(notes, seqById, deletedIds = []) {
+    return withStore(STORE_NOTES, 'readwrite', (store) => {
+        for (const note of notes) {
+            const seq = seqById instanceof Map ? seqById.get(note.id) : seqById?.[note.id];
+            store.put({ ...note, _dirty: 0, _baseSeq: Number(seq) || note._baseSeq || 0 });
+        }
+
+        for (const id of deletedIds) {
+            store.delete(id);
+        }
+    });
+}
+
+export async function resetForFullResync() {
+    return withStore(STORE_NOTES, 'readwrite', (store) => {
+        const req = store.openCursor();
+
+        req.onsuccess = () => {
+            const cursor = req.result;
+            if (!cursor) return;
+            if (!cursor.value._dirty) cursor.delete();
+            cursor.continue();
+        };
+    });
+}
+
+export async function applyRemoteBatch(notes, deletedIds = []) {
     const db = await openDB();
 
     return new Promise((resolve, reject) => {
         const tx = db.transaction(STORE_NOTES, 'readwrite');
         const store = tx.objectStore(STORE_NOTES);
 
-        // The pushed records are now represented on the server at `seq`, so a
-        // later edit builds on that version instead of looking like a conflict.
+        for (const id of deletedIds) {
+            const req = store.get(id);
+            req.onsuccess = () => {
+                const local = req.result;
+                if (local && local._dirty) return;
+                store.delete(id);
+            };
+        }
+
         for (const note of notes) {
-            store.put({ ...note, _dirty: 0, _baseSeq: seq });
+            const req = store.get(note.id);
+            req.onsuccess = () => {
+                const local = req.result;
+                if (local && local._dirty) return;
+                store.put(toLocalNote(note, { dirty: 0, baseSeq: Number(note.seq) || 0, deleted: 0 }));
+            };
         }
 
-        for (const note of deletions) {
-            store.delete(note.id);
-        }
-
-        tx.oncomplete = () => resolve();
+        tx.oncomplete = () => resolve(true);
         tx.onerror = () => reject(tx.error);
         tx.onabort = () => reject(tx.error);
     });
 }
 
-/** Apply a server record without marking it dirty (it already exists remotely). */
-export async function applyRemoteNote(note, seq) {
-    return withStore(STORE_NOTES, 'readwrite', (store) =>
-        store.put(toLocalNote(note, { dirty: 0, baseSeq: seq, deleted: 0 }))
-    );
-}
-
-export async function applyRemoteDelete(id) {
-    return withStore(STORE_NOTES, 'readwrite', (store) => store.delete(id));
-}
-
-/* --------------------------------------------------------------- queries */
-
-/**
- * Mirrors the server's list query (list.js) against the local store.
- *
- * Search uses substring matching instead of SQLite FTS5. For Chinese text this
- * is actually more predictable than the server's tokenizer, which cannot split
- * Chinese words reliably.
- */
 export function queryNotes(rows, { category = '', subcategory = '', q = '', tag = '' } = {}) {
     let out = rows.filter((n) => !n._deleted);
 
@@ -278,7 +242,6 @@ export function queryNotes(rows, { category = '', subcategory = '', q = '', tag 
     return out;
 }
 
-/** Same ordering as the SQL: title NOCASE asc, then updated_at desc. */
 export function sortNotes(rows) {
     return [...rows].sort((a, b) => {
         const byTitle = String(a.title || '').localeCompare(String(b.title || ''), undefined, {
@@ -305,13 +268,8 @@ export function paginate(rows, page, size) {
     };
 }
 
-/* --------------------------------------------------------------- folders */
-
 export async function replaceFolders(folders) {
-    const db = await openDB();
-    return new Promise((resolve, reject) => {
-        const tx = db.transaction(STORE_FOLDERS, 'readwrite');
-        const store = tx.objectStore(STORE_FOLDERS);
+    return withStore(STORE_FOLDERS, 'readwrite', (store) => {
         store.clear();
         for (const f of folders || []) {
             store.put({
@@ -320,12 +278,9 @@ export async function replaceFolders(folders) {
                 subcategory: f.subcategory || ''
             });
         }
-        tx.oncomplete = () => resolve();
-        tx.onerror = () => reject(tx.error);
     });
 }
 
-/** Folder tree derived from notes, for when the server list is unavailable. */
 export async function deriveFoldersFromNotes() {
     const rows = await allNotes();
     const seen = new Map();
@@ -341,8 +296,6 @@ export async function deriveFoldersFromNotes() {
     return [...seen.values()];
 }
 
-/* ----------------------------------------------------------------- media */
-
 export async function putMediaBlob(key, blob) {
     return withStore(STORE_MEDIA, 'readwrite', (store) =>
         store.put({ key, blob, size: blob.size || 0, accessedAt: Date.now() })
@@ -350,32 +303,60 @@ export async function putMediaBlob(key, blob) {
 }
 
 export async function getMediaBlob(key) {
-    const db = await openDB();
-    return new Promise((resolve, reject) => {
-        const tx = db.transaction(STORE_MEDIA, 'readonly');
-        const req = tx.objectStore(STORE_MEDIA).get(key);
-        req.onsuccess = () => resolve(req.result || null);
-        req.onerror = () => reject(req.error);
-    });
+    return (await withRead(STORE_MEDIA, (store) => store.get(key))) || null;
+}
+
+export async function deleteMediaBlob(key) {
+    return withStore(STORE_MEDIA, 'readwrite', (store) => store.delete(key));
 }
 
 export async function listMediaKeys() {
+    return (await withRead(STORE_MEDIA, (store) => store.getAllKeys())) || [];
+}
+
+export async function mediaTotalBytes() {
     const db = await openDB();
+
     return new Promise((resolve, reject) => {
         const tx = db.transaction(STORE_MEDIA, 'readonly');
-        const req = tx.objectStore(STORE_MEDIA).getAllKeys();
-        req.onsuccess = () => resolve(req.result || []);
-        req.onerror = () => reject(req.error);
+        let total = 0;
+        const req = tx.objectStore(STORE_MEDIA).openCursor();
+
+        req.onsuccess = () => {
+            const cursor = req.result;
+            if (!cursor) return;
+            total += Number(cursor.value.size) || 0;
+            cursor.continue();
+        };
+
+        tx.oncomplete = () => resolve(total);
+        tx.onerror = () => reject(tx.error);
     });
 }
 
-/* ----------------------------------------------------------------- stats */
-
 export async function localStats() {
-    const rows = await allNotes();
-    return {
-        total: rows.filter((r) => !r._deleted).length,
-        dirty: rows.filter((r) => r._dirty && !r._deleted).length,
-        tombstones: rows.filter((r) => r._deleted).length
-    };
+    const db = await openDB();
+
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction(STORE_NOTES, 'readonly');
+        let total = 0;
+        let dirty = 0;
+        let tombstones = 0;
+        const req = tx.objectStore(STORE_NOTES).openCursor();
+
+        req.onsuccess = () => {
+            const cursor = req.result;
+            if (!cursor) return;
+            const row = cursor.value;
+            if (row._deleted) tombstones += 1;
+            else {
+                total += 1;
+                if (row._dirty) dirty += 1;
+            }
+            cursor.continue();
+        };
+
+        tx.oncomplete = () => resolve({ total, dirty, tombstones });
+        tx.onerror = () => reject(tx.error);
+    });
 }

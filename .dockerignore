@@ -8,18 +8,30 @@ node_modules
 .env
 data
 *.log
+*.db
+*.db-wal
+*.db-shm
+
+# Local backups / secrets must never reach the build context
+*.apk
+*.jks
+*.keystore
+note-backup-*.json
 
 # Build & Documentation Artifacts (Not needed at runtime)
 Dockerfile
-docker-compose.yml
+docker-compose*.yml
 README.md
 LICENSE
 assets/screenshots
 
-# Desktop build outputs — the server image needs neither. src-tauri carries a
-# multi-gigabyte Rust target directory that would otherwise be sent as build
-# context on every build.
+# Desktop / mobile build outputs — the server image needs none of them.
+# src-tauri carries a multi-gigabyte Rust target directory and the generated
+# Android project, both of which would otherwise be sent as build context.
 dist
+dist-android
 src-tauri
 scripts
 docs
+.workbuddy
+.playwright-cli

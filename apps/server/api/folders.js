@@ -93,32 +93,21 @@ router.put('/', authMiddleware, async (c) => {
     return jsonError(c, 'Invalid rename parameters', 400);
   }
 
-  try {
-    if (!oldSubcategory) {
-      // Renaming a top-level category
-      const updateNotes = db.prepare(
-        'UPDATE notes SET category = ?, updated_at = CURRENT_TIMESTAMP WHERE category = ?'
-      ).bind(newName, oldCategory);
-      const updateFolders = db.prepare(
-        'UPDATE folders SET category = ?, updated_at = CURRENT_TIMESTAMP WHERE category = ?'
-      ).bind(newName, oldCategory);
-      
-      await db.batch([updateNotes, updateFolders]);
-      
-      return c.json({ success: true, oldCategory, newCategory: newName });
-    } else {
-      // Renaming a subcategory
-      const updateNotes = db.prepare(
-        'UPDATE notes SET subcategory = ?, updated_at = CURRENT_TIMESTAMP WHERE category = ? AND subcategory = ?'
-      ).bind(newName, oldCategory, oldSubcategory);
-      const updateFolders = db.prepare(
-        'UPDATE folders SET subcategory = ?, updated_at = CURRENT_TIMESTAMP WHERE category = ? AND subcategory = ?'
-      ).bind(newName, oldCategory, oldSubcategory);
+  const targetColumn = oldSubcategory ? 'subcategory' : 'category';
+  const whereSql = oldSubcategory ? 'category = ? AND subcategory = ?' : 'category = ?';
+  const whereParams = oldSubcategory ? [oldCategory, oldSubcategory] : [oldCategory];
 
-      await db.batch([updateNotes, updateFolders]);
-      
-      return c.json({ success: true, oldCategory, oldSubcategory, newSubcategory: newName });
-    }
+  try {
+    await db.batch([
+      db.prepare(`UPDATE notes SET ${targetColumn} = ? WHERE ${whereSql}`)
+        .bind(newName, ...whereParams),
+      db.prepare(`UPDATE folders SET ${targetColumn} = ?, updated_at = CURRENT_TIMESTAMP WHERE ${whereSql}`)
+        .bind(newName, ...whereParams)
+    ]);
+
+    return c.json(oldSubcategory
+      ? { success: true, oldCategory, oldSubcategory, newSubcategory: newName }
+      : { success: true, oldCategory, newCategory: newName });
   } catch (err) {
     if (String(err?.message || '').includes('UNIQUE constraint failed')) {
       return jsonError(c, 'Folder name already exists', 409);
@@ -128,3 +117,4 @@ router.put('/', authMiddleware, async (c) => {
 });
 
 export default router;
+

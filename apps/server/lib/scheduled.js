@@ -1,9 +1,12 @@
 import { setImmediate as waitImmediate } from 'timers/promises';
 import { extractMediaKeys } from './utils.js';
 import { db, bucket } from './core.js';
+import { pruneSyncChanges } from './sync.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const LOOP_YIELD_EVERY = 200;
+
+const SYNC_CHANGE_RETAIN_DAYS = 30;
 
 function uploadedAtMs(obj) {
     const ts = obj?.uploaded instanceof Date ? obj.uploaded.getTime() : Date.parse(String(obj?.uploaded || ''));
@@ -16,12 +19,9 @@ async function maybeYield(iterationCount) {
     }
 }
 
-// Rebuild note_media index: extract all media keys from current notes.
-// Also used after a bulk restore, which does not maintain the index per note.
 export async function rebuildNoteMediaIndex() {
-    // Clear the table
     await db.prepare('DELETE FROM note_media').run();
-    
+
     const insertMediaKey = db.db.prepare('INSERT OR IGNORE INTO note_media (note_id, media_key) VALUES (?, ?)');
     const flushPendingKeys = db.db.transaction((records) => {
         for (const record of records) {
@@ -33,7 +33,6 @@ export async function rebuildNoteMediaIndex() {
     const BATCH_SIZE = 250;
     let noteCount = 0;
 
-    // Iterate all notes and extract media keys
     for (const row of db.prepare('SELECT id, content FROM notes').iterate()) {
         noteCount += 1;
 
@@ -73,12 +72,10 @@ async function cleanupStaleTmpObjects(cutoff) {
     return { scanned, deleted };
 }
 
-// Ultra-fast GC: iterate bucket, check note_media index
 async function cleanupOrphanedMediaFast() {
     let scanned = 0;
     let deleted = 0;
 
-    // Iterate bucket and check presence in note_media index
     const checkKeyStmt = db.db.prepare('SELECT 1 FROM note_media WHERE media_key = ? LIMIT 1');
 
     for await (const obj of bucket.iterate()) {
@@ -90,14 +87,12 @@ async function cleanupOrphanedMediaFast() {
             continue;
         }
 
-        // Check if this key is referenced in any note
         const isUsed = !!checkKeyStmt.get(key);
         if (!isUsed) {
             try {
                 await bucket.delete(key);
                 deleted += 1;
             } catch {
-                // Ignore delete failures
             }
         }
 
@@ -123,7 +118,11 @@ export async function scheduledGc() {
         if (mediaStats.deleted > 0) {
             console.log(`Media GC: deleted ${mediaStats.deleted} orphaned media files out of ${mediaStats.scanned} scanned.`);
         }
+
+        const pruned = await pruneSyncChanges({ retainDays: SYNC_CHANGE_RETAIN_DAYS });
+        console.log(`Sync GC: pruned change rows older than ${pruned.cutoff}.`);
     } catch (e) {
         console.error('Scheduled GC failed:', e);
     }
 }
+

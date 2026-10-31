@@ -1,5 +1,5 @@
 import { UI } from './ui.js';
-import { Nonce } from './api.js';
+import { Nonce, authHeaders, getApiBase } from './api.js';
 import { swalAlert } from './swal.js';
 
 const MAX_UPLOAD_BYTES = 100 * 1024 * 1024;
@@ -65,14 +65,14 @@ export const Upload = {
         }
 
         const xhr = new XMLHttpRequest();
-        xhr.open('POST', '/api/upload', true);
+        xhr.open('POST', `${getApiBase()}/api/upload`, true);
         xhr.setRequestHeader('Content-Type', mime);
-        
-        const authNonce = Nonce.get();
-        if (authNonce) xhr.setRequestHeader('X-Session-Nonce', authNonce);
+
+        const auth = authHeaders();
+        Object.entries(auth).forEach(([name, value]) => xhr.setRequestHeader(name, value));
 
         const startTime = Date.now();
-        
+
         const widget = createProgressWidget(editorWrapper, mime, () => {
             xhr.abort();
             if (widget?.container) widget.container.remove();
@@ -81,7 +81,7 @@ export const Upload = {
 
         xhr.upload.onprogress = (e) => {
             if (!e.lengthComputable || !widget) return;
-            
+
             const percent = (e.loaded / e.total) * 100;
             widget.progressBar.style.width = percent + '%';
             widget.progressText.innerText = Math.round(percent) + '%';
@@ -141,3 +141,4 @@ export const Upload = {
         return xhr;
     }
 };
+

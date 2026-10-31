@@ -1,10 +1,9 @@
 import { Utils, State, escapeHtml } from './dom.js';
-import { API } from './api.js';
 import { UI } from './ui.js';
 import { swalAlert, swalUnsaved } from './swal.js';
 import { Upload } from './upload.js';
 import * as LocalDB from './localdb.js';
-import { queueNoteSave } from './sync.js';
+import { queueNoteSave, syncNow, SyncStatus, serverNowIso } from './sync.js';
 import { sanitizePastedHtml } from './paste.js?v=5.5';
 import Squire from '../assets/squire.mjs';
 import { IndentPlugin } from './editor-indent.js?v=5.4';
@@ -179,10 +178,6 @@ export const Editor = {
         const returnPage = State.editingId && Number.isFinite(State.page) && State.page > 0 ? State.page : 1;
 
         try {
-            // Local-first write. Persist to IndexedDB and let the sync engine
-            // push it in the background: saving no longer waits on the network
-            // and works while offline. The server stays authoritative and
-            // re-sanitises the content when the change is pushed.
             const existing = State.editingId ? await LocalDB.getNote(State.editingId) : null;
             const id = String(State.editingId || (globalThis.crypto?.randomUUID
                 ? globalThis.crypto.randomUUID()
@@ -194,10 +189,10 @@ export const Editor = {
                 category: String(el.nCategory.value || '').trim(),
                 subcategory: String(el.nSubcategory.value || '').trim(),
                 tags: normalizeTagInput(el.nTags?.value),
-                createdAt: existing?.createdAt || new Date().toISOString(),
+                createdAt: existing?.createdAt || serverNowIso(),
                 updatedAt: el.nDate.value
                     ? `${el.nDate.value}T00:00:00.000Z`
-                    : new Date().toISOString(),
+                    : serverNowIso(),
                 content: this._getEditorHTML()
             };
 
@@ -472,7 +467,7 @@ export const Editor = {
         this._renderMetaSuggestions();
         this._metaSuggestMenu.classList.add('show');
         this._repositionMetaSuggestions();
-        this._metaSuggestMenu.querySelector('.active')?.scrollIntoView({ block: 'nearest' });
+        this._scrollActiveMetaSuggestion();
     },
 
     _hideMetaSuggestions(field = '') {
@@ -516,6 +511,10 @@ export const Editor = {
         if (!this._metaSuggestOptions.length) return;
         this._metaSuggestActiveIndex = Math.max(0, Math.min(this._metaSuggestOptions.length - 1, index));
         this._renderMetaSuggestions();
+        this._scrollActiveMetaSuggestion();
+    },
+
+    _scrollActiveMetaSuggestion() {
         this._metaSuggestMenu?.querySelector('.active')?.scrollIntoView({ block: 'nearest' });
     },
 
@@ -576,6 +575,10 @@ export const Editor = {
     },
 
     async open(mode, data = {}, anchorEl) {
+        if (SyncStatus.state !== 'offline' && Date.now() - SyncStatus.lastSyncAt > 30_000) {
+            syncNow().catch(() => {});
+        }
+
         this._sessionId += 1;
         const sid = this._sessionId;
         this._setupMobileContext();
@@ -771,3 +774,4 @@ export const Editor = {
         if (xhr) this._activeUploads.add(xhr);
     }
 };
+

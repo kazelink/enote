@@ -112,9 +112,6 @@ router.get('/', authMiddleware, async (c) => {
   const total = Number(totalRow?.total ?? 0);
   const totalPg = Math.max(1, Math.ceil(total / limit));
 
-  // A stale URL can point past the end (last note on the final page deleted, or
-  // an old bookmark). Clamp to the last real page so the list never renders as
-  // empty while notes actually exist.
   const safePage = Math.min(requestedPage, totalPg);
 
   const listRes = await db.prepare(
@@ -138,3 +135,4 @@ router.get('/', authMiddleware, async (c) => {
 });
 
 export default router;
+

@@ -1,13 +1,4 @@
-const ESC_MAP = {
-    '&': '&amp;',
-    '<': '&lt;',
-    '>': '&gt;',
-    '"': '&quot;',
-    "'": '&#39;',
-    '`': '&#x60;'
-};
-
-const ESC_RE = /[&<>"'`]/g;
+export { escapeHtml } from '../../client/shared/render.js';
 
 const ENTITY_MAP = {
     '&nbsp;': ' ',
@@ -18,9 +9,6 @@ const ENTITY_MAP = {
     '&#39;': "'",
     '&#x60;': '`'
 };
-
-export const escapeHtml = (str) =>
-    str == null ? '' : String(str).replace(ESC_RE, (char) => ESC_MAP[char] || char);
 
 export function respondError(c, msg, status) {
     if (c.req.header('HX-Request')) return c.html(`<div class="auth-err">${msg}</div>`, status);
@@ -72,7 +60,6 @@ export function parseStoredTags(raw) {
         const parsed = JSON.parse(raw);
         if (Array.isArray(parsed)) return normalizeTagList(parsed);
     } catch {
-        // Fall back to splitting plain text tag strings.
     }
 
     return normalizeTagList(raw);
@@ -120,13 +107,11 @@ const PROTECTED_PREFIXES = ['backups/'];
 const isProtectedKey = (key) =>
     PROTECTED_PREFIXES.some((prefix) => String(key || '').startsWith(prefix));
 
-// Use note_media table for fast media key lookup
 async function filterUnusedMediaKeys(db, keys) {
     if (!db || !Array.isArray(keys) || keys.length === 0) return keys;
 
     const placeholders = keys.map(() => '?').join(', ');
-    
-    // Fast: indexed query against note_media table
+
     const usedResult = await db.prepare(`
         SELECT DISTINCT media_key
         FROM note_media
@@ -206,3 +191,4 @@ export function toBackupFolder(row) {
         updatedAt: row.updated_at
     };
 }
+

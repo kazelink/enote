@@ -15,17 +15,17 @@ const TMP_MEDIA_REGEX = /\/(img|video)\/tmp\/([a-zA-Z0-9.\-_]+)/g;
 
 function planTempMediaPromotion(content) {
   const tmpMatches = [...content.matchAll(TMP_MEDIA_REGEX)];
-  const finalKeys = [...new Set(tmpMatches.map((m) => m[2]))];
+  const finalKeys = new Set(tmpMatches.map((m) => m[2]));
 
-  if (finalKeys.length === 0) {
+  if (!finalKeys.size) {
     return { content, finalKeys: [] };
   }
 
   const updatedContent = content.replace(TMP_MEDIA_REGEX, (full, route, key) =>
-    finalKeys.includes(key) ? `/${route}/${key}` : full
+    finalKeys.has(key) ? `/${route}/${key}` : full
   );
 
-  return { content: updatedContent, finalKeys };
+  return { content: updatedContent, finalKeys: [...finalKeys] };
 }
 
 async function promotePlannedTempMedia(bucket, finalKeys) {
@@ -33,9 +33,6 @@ async function promotePlannedTempMedia(bucket, finalKeys) {
   if (!bucket) throw new Error('Storage not configured');
 
   for (const key of finalKeys) {
-    // Atomic same-volume rename instead of a stream copy: O(1) even for large
-    // videos, and leaves no tmp file behind to clean up. A missing tmp file is
-    // fine when the final key already exists (e.g. re-saving the same content).
     const moved = await bucket.move(`tmp/${key}`, key);
     if (!moved && !bucket.has(key)) {
       throw new Error(`Missing temporary media: ${key}`);
@@ -43,8 +40,6 @@ async function promotePlannedTempMedia(bucket, finalKeys) {
   }
 }
 
-// The note_media index is consulted by media-cleanup decisions, so it must be
-// updated in the same transaction as the content it mirrors.
 function noteMediaStatements(id, content) {
   return [
     db.prepare('DELETE FROM note_media WHERE note_id = ?').bind(id),
@@ -58,7 +53,6 @@ async function restorePreviousNoteState(previousNote, id) {
   if (!previousNote) {
     await db.batch([
       db.prepare('DELETE FROM notes WHERE id = ?').bind(id),
-      // Explicit for databases created before foreign_keys enforcement.
       db.prepare('DELETE FROM note_media WHERE note_id = ?').bind(id)
     ]);
     return;
@@ -188,3 +182,4 @@ router.post('/', authMiddleware, async (c) => {
 });
 
 export default router;
+

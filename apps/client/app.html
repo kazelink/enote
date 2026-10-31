@@ -12,9 +12,7 @@
     <link rel="preload" href="/assets/fonts/remixicon.woff2" as="font" type="font/woff2" crossorigin="anonymous">
     <link href="/assets/fancybox.css" rel="stylesheet">
     <link href="./app.css?v=5.20" rel="stylesheet">
-    <!-- Preload the whole ES module graph so a high-latency link pays one round
-         trip instead of a discovery waterfall. URLs (incl. ?v=) must match the
-         import specifiers exactly, or the browser fetches modules twice. -->
+    
     <link rel="modulepreload" href="/modules/app.js?v=5.15">
     <link rel="modulepreload" href="/modules/dom.js">
     <link rel="modulepreload" href="/modules/api.js">
@@ -49,24 +47,26 @@
                 </button>
             </form>
             <div id="auth-messages"></div>
+            <div id="auth-server-current" class="auth-server-current" hidden
+                onclick="App.toggleServerPanel()"></div>
             <button type="button" class="auth-server-btn" id="btn-server-settings"
-                onclick="App.toggleServerPanel()" title="设置服务器地址 / Server address">
+                onclick="App.toggleServerPanel()" title="Server address">
                 <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor"
                     stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                     <rect x="2.5" y="4" width="19" height="6" rx="1.6"></rect>
                     <rect x="2.5" y="14" width="19" height="6" rx="1.6"></rect>
                     <path d="M6.5 7h.01M6.5 17h.01"></path>
                 </svg>
-                <span>服务器设置</span>
+                <span>Server</span>
             </button>
 
             <div id="auth-server-panel" class="auth-server-panel" hidden>
-                <label class="auth-server-label" for="auth-server-input">服务器地址</label>
+                <label class="auth-server-label" for="auth-server-input">Server address</label>
                 <input type="text" id="auth-server-input" class="auth-server-input"
-                    placeholder="http://192.168.1.20:3000" autocomplete="off" spellcheck="false">
+                    autocomplete="off" spellcheck="false">
                 <div class="auth-server-actions">
                     <button type="button" class="auth-server-save"
-                        onclick="App.saveServerAddress()">保存并连接</button>
+                        onclick="App.saveServerAddress()">Save &amp; Connect</button>
                 </div>
                 <div id="auth-server-hint" class="auth-server-hint"></div>
             </div>
@@ -340,7 +340,6 @@
                                     type="button">RESTORE</button>
                             </div>
                             <input type="file" id="restore-input" accept=".json,application/json" style="display:none">
-                            <div id="restore-msg" class="restore-msg"></div>
                         </div>
                     </div>
                 </div>
@@ -357,13 +356,16 @@
             onclick="App.renameFromContextMenu()">RENAME</button>
     </div>
 
-    <!-- Backup entry: revealed when the pointer enters the bottom-right corner,
-         and only on the home list. A separate transparent zone makes that
-         reveal possible without leaving the button permanently on screen. -->
+    
     <div class="backup-fab-zone" aria-hidden="true"></div>
     <button class="backup-fab" id="btn-backup" type="button" onclick="App.openBackup()"
-        aria-label="备份与恢复" title="备份与恢复 / Backup &amp; Restore">
-        <i class="ri-archive-2-line"></i>
+        aria-label="Backup and restore" title="Backup &amp; Restore">
+        
+        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor"
+            stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M3 7.5A2.5 2.5 0 0 1 5.5 5h3.3c.5 0 1 .2 1.3.6l1.3 1.4h6.1A2.5 2.5 0 0 1 20 9.5v7A2.5 2.5 0 0 1 17.5 19h-12A2.5 2.5 0 0 1 3 16.5v-9z">
+            </path>
+        </svg>
     </button>
 
     <div id="swal-root"></div>

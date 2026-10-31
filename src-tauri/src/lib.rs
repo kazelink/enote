@@ -1,17 +1,8 @@
-//! Tauri entry point.
-//!
-//! The desktop shell stays thin: the UI is the same bundle the browser could
-//! load, and all data access goes through IndexedDB plus the sync HTTP API. No
-//! Node process is bundled, which keeps the installer at ~1.4 MB and lets a
-//! mobile build reuse the exact same assets.
-
 use std::io::Write;
+
+#[cfg(desktop)]
 use tauri::{WebviewUrl, WebviewWindowBuilder};
 
-/// Appends a line to `enote-startup.log` next to the executable.
-///
-/// A packaged app has no console, so without this a blank window is
-/// indistinguishable from a crash. Cheap enough to keep enabled.
 fn debug_log(msg: &str) {
     let path = std::env::current_exe()
         .ok()
@@ -27,15 +18,19 @@ fn debug_log(msg: &str) {
 pub fn run() {
     debug_log("=== startup ===");
 
-    tauri::Builder::default()
-        .setup(|app| {
-            // The window is created in code rather than in tauri.conf.json so
-            // the entry file can be `main.html`: Tauri rewrites `index.html` to
-            // the bare origin, and its asset resolver serves no directory index.
+    #[allow(unused_mut)]
+    let mut builder = tauri::Builder::default();
+
+    // On mobile the window comes from tauri.android.conf.json: wry has no
+    // multi-window support there, so building one by hand has no effect and
+    // would leave the webview unattached.
+    #[cfg(desktop)]
+    {
+        builder = builder.setup(|app| {
             WebviewWindowBuilder::new(app, "main", WebviewUrl::App("main.html".into()))
                 .title("eNote")
                 .inner_size(1280.0, 860.0)
-                .min_inner_size(960.0, 640.0)
+                .min_inner_size(380.0, 480.0)
                 .center()
                 .on_page_load(|_webview, payload| {
                     debug_log(&format!(
@@ -47,7 +42,10 @@ pub fn run() {
                 .build()?;
 
             Ok(())
-        })
+        });
+    }
+
+    builder
         .run(tauri::generate_context!())
         .expect("error while running eNote");
 }

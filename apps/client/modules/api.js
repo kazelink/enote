@@ -1,37 +1,25 @@
 import { UI } from './ui.js';
 
-let memNonce = null;
-let memToken = null;
+function createSessionStore(key) {
+    let memValue = null;
+    return {
+        get() {
+            try { return sessionStorage.getItem(key) || memValue; }
+            catch { return memValue; }
+        },
+        set(val) {
+            memValue = val;
+            try { sessionStorage.setItem(key, val); } catch {}
+        },
+        clear() {
+            memValue = null;
+            try { sessionStorage.removeItem(key); } catch {}
+        }
+    };
+}
 
-export const Nonce = {
-    get() {
-        try { return sessionStorage.getItem('session_nonce') || memNonce; }
-        catch (e) { return memNonce; }
-    },
-    set(val) {
-        memNonce = val;
-        try { sessionStorage.setItem('session_nonce', val); } catch (e) { }
-    },
-    clear() {
-        memNonce = null;
-        try { sessionStorage.removeItem('session_nonce'); } catch (e) { }
-    }
-};
-
-export const Token = {
-    get() {
-        try { return sessionStorage.getItem('session_token') || memToken; }
-        catch (e) { return memToken; }
-    },
-    set(val) {
-        memToken = val;
-        try { sessionStorage.setItem('session_token', val); } catch (e) { }
-    },
-    clear() {
-        memToken = null;
-        try { sessionStorage.removeItem('session_token'); } catch (e) { }
-    }
-};
+export const Nonce = createSessionStore('session_nonce');
+export const Token = createSessionStore('session_token');
 
 export function authHeaders(extra = {}) {
     const headers = { ...extra };
@@ -42,30 +30,25 @@ export function authHeaders(extra = {}) {
     return headers;
 }
 
-/**
- * Server address for the packaged shell.
- *
- * In a browser the app is served from the same origin as the API, so an empty
- * base means "relative paths" and nothing changes. In Tauri the page loads
- * from the app bundle (tauri://localhost), where a relative `/api/...` would
- * point at local resources instead of the server — so the shell stores the
- * server URL here.
- */
+export function isDesktopShell() {
+    return location.hostname === 'tauri.localhost'
+        || location.protocol === 'tauri:'
+        || Boolean(window.__TAURI_INTERNALS__);
+}
+
+function isMobileShell() {
+    return isDesktopShell() && /Android|iPhone|iPad|iPod/i.test(navigator.userAgent || '');
+}
+
 export function getApiBase() {
     try {
         const stored = String(localStorage.getItem('enote_api_base') || '').replace(/\/+$/, '');
         if (stored) return stored;
-    } catch {
-        // Fall through to the shell default.
-    }
+    } catch {}
 
-    // Tauri: default to the local Docker port instead of prompting on first
-    // launch. The login screen still exposes the server-address panel.
-    if (location.hostname === 'tauri.localhost'
-        || location.protocol === 'tauri:'
-        || Boolean(window.__TAURI_INTERNALS__)) {
-        return 'http://127.0.0.1:3000';
-    }
+    // The desktop build may have a server on the same machine; a phone has none,
+    // so it stays empty and the first-run prompt asks for the address instead.
+    if (!isMobileShell() && isDesktopShell()) return 'http://127.0.0.1:3000';
 
     return '';
 }
@@ -73,15 +56,13 @@ export function getApiBase() {
 export function setApiBase(url) {
     try {
         localStorage.setItem('enote_api_base', String(url || '').trim().replace(/\/+$/, ''));
-    } catch {
-        // Storage can be unavailable in hardened contexts; relative paths still work.
-    }
+    } catch {}
 }
 
 function buildApiUrl(endpoint, data = {}) {
     const base = endpoint.startsWith('/api/') ? endpoint : `/api/${endpoint}`;
     const params = new URLSearchParams(
-        Object.entries(data).filter(([_, value]) => value != null && value !== '')
+        Object.entries(data).filter(([, value]) => value != null && value !== '')
     );
     const path = `${getApiBase()}${base}`;
     return params.toString() ? `${path}?${params.toString()}` : path;
@@ -98,20 +79,18 @@ async function handleUnauthorized(res, payload) {
     throw err;
 }
 
-// Abort stalled requests so a dead tunnel surfaces as an error instead of an
-// endless spinner. 60s accommodates slow links; uploads/downloads (which can
-// legitimately run longer) use their own XHR/fetch paths without this signal.
-const REQUEST_TIMEOUT_MS = 60000;
+const REQUEST_TIMEOUT_MS = 30000;
+const SYNC_TIMEOUT_MS = 15000;
 
-function requestSignal() {
+function requestSignal(timeoutMs) {
     return typeof AbortSignal !== 'undefined' && AbortSignal.timeout
-        ? AbortSignal.timeout(REQUEST_TIMEOUT_MS)
+        ? AbortSignal.timeout(timeoutMs)
         : undefined;
 }
 
-async function fetchWithTimeout(url, options) {
+async function fetchWithTimeout(url, options, timeoutMs = REQUEST_TIMEOUT_MS) {
     try {
-        return await fetch(url, { ...options, signal: requestSignal() });
+        return await fetch(url, { ...options, signal: requestSignal(timeoutMs) });
     } catch (e) {
         if (e?.name === 'TimeoutError' || e?.name === 'AbortError') {
             const err = new Error('Request timed out. Check your connection.');
@@ -122,19 +101,38 @@ async function fetchWithTimeout(url, options) {
     }
 }
 
+function safeStorageGet(key) {
+    try {
+        return localStorage.getItem(key) || '';
+    } catch {
+        return '';
+    }
+}
+
+function safeStorageSet(key, value) {
+    if (!value || value.length > 1024 * 1024) return;
+    try {
+        localStorage.setItem(key, value);
+    } catch {}
+}
+
 export const API = {
     async req(endpoint, data = {}, method = 'GET') {
         const hasBody = method === 'POST' || method === 'PUT' || method === 'PATCH';
         const url = buildApiUrl(endpoint, hasBody ? {} : data);
         const headers = authHeaders();
-        let body = undefined;
+        let body;
 
         if (hasBody) {
             headers['Content-Type'] = 'application/json';
             body = JSON.stringify(data);
         }
 
-        const res = await fetchWithTimeout(url, { method, headers, body, credentials: 'include', cache: 'no-store' });
+        const res = await fetchWithTimeout(
+            url,
+            { method, headers, body, credentials: 'include', cache: 'no-store' },
+            String(endpoint).replace(/^\/?api\//, '').startsWith('sync/') ? SYNC_TIMEOUT_MS : REQUEST_TIMEOUT_MS
+        );
         const contentType = (res.headers.get('content-type') || '').toLowerCase();
         let payload = null;
 
@@ -159,11 +157,24 @@ export const API = {
 
     async html(endpoint, data = {}) {
         const url = buildApiUrl(endpoint, data);
-        const res = await fetchWithTimeout(url, {
-            headers: authHeaders({ 'HX-Request': 'true' }),
-            credentials: 'include',
-            cache: 'no-store'
-        });
+        const cacheKey = `enote:html:${url}`;
+
+        let res;
+        try {
+            res = await fetchWithTimeout(url, {
+                headers: authHeaders({ 'HX-Request': 'true' }),
+                credentials: 'include',
+                cache: 'no-store'
+            });
+        } catch (err) {
+            const cached = safeStorageGet(cacheKey);
+            if (cached) {
+                document.body.classList.add('is-offline');
+                return cached;
+            }
+            throw err;
+        }
+
         const text = await res.text().catch(() => '');
         await handleUnauthorized(res, { error: text });
 
@@ -174,6 +185,8 @@ export const API = {
             throw err;
         }
 
+        safeStorageSet(cacheKey, text);
+        document.body.classList.remove('is-offline');
         return text;
     }
 };

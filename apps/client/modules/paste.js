@@ -1,3 +1,5 @@
+import { TABLE_SCOPE_VALUES, isSafeMediaSrc, sanitizeSpanAttribute } from '../shared/media-rules.js';
+
 const ALLOWED_TAGS = new Set([
     'p', 'div', 'h1', 'h2', 'blockquote', 'br',
     'span', 'b', 'strong', 'i', 'em', 'u', 's', 'code', 'pre',
@@ -13,11 +15,8 @@ const STRIP_WITH_CONTENT = new Set([
 const BLOCK_ALIGN_TAGS = new Set(['p', 'div', 'h1', 'h2', 'blockquote', 'ul', 'ol', 'li', 'th', 'td', 'caption']);
 const INDENT_TAGS = new Set(['p', 'div', 'h1', 'h2', 'blockquote', 'ul', 'ol', 'li']);
 const ALIGN_VALUES = new Set(['left', 'center', 'right', 'justify']);
-const TABLE_SCOPE_VALUES = new Set(['row', 'col', 'rowgroup', 'colgroup']);
-const DIVIDER_TEXT = '----------';
 const DIVIDER_CLASS = 'text-divider';
 const SAFE_COLOR_RE = /^(#[0-9a-f]{3,8}|rgb(a)?\(\s*[\d.\s,%]+\)|hsl(a)?\(\s*[\d.\s,%]+\)|[a-z]{1,20}|var\(\s*--[a-z0-9_-]+\s*(,\s*(#[0-9a-f]{3,8}|rgb(a)?\(\s*[\d.\s,%]+\)|hsl(a)?\(\s*[\d.\s,%]+\)))?\s*\))$/i;
-const SAFE_DATA_IMAGE_RE = /^data:image\/(?:png|jpe?g|gif|webp);base64,[a-z0-9+/=\s]+$/i;
 
 function parseStyleMap(styleText) {
     const styleMap = new Map();
@@ -50,20 +49,6 @@ function isSafeHref(value) {
         || compact.startsWith('/')
         || compact.startsWith('mailto:')
         || compact.startsWith('tel:');
-}
-
-function isSafeMediaSrc(value) {
-    if (typeof value !== 'string') return false;
-    const trimmed = value.trim();
-    if (!trimmed || /[\u0000-\u001f\u007f]/.test(trimmed)) return false;
-
-    const compact = trimmed.replace(/\s+/g, '');
-    const lower = compact.toLowerCase();
-
-    if (lower.startsWith('/img/backups/') || lower.startsWith('/video/backups/')) return false;
-    if (lower.startsWith('/img/') || lower.startsWith('/video/')) return true;
-    if (lower.startsWith('https://') || lower.startsWith('http://')) return true;
-    return SAFE_DATA_IMAGE_RE.test(compact);
 }
 
 function sanitizeClass(tag, value) {
@@ -101,11 +86,6 @@ function sanitizeStyle(tag, styleMap) {
     }
 
     return safeRules.join(';');
-}
-
-function sanitizeSpanAttribute(value) {
-    const numeric = parseInt(String(value || '').trim(), 10);
-    return Number.isInteger(numeric) && numeric >= 1 && numeric <= 20 ? String(numeric) : '';
 }
 
 function isBoldWeight(value) {
@@ -274,3 +254,4 @@ export function sanitizePastedHtml(html) {
     Array.from(doc.body.childNodes).forEach(sanitizeNode);
     return doc.body.innerHTML.trim();
 }
+

@@ -41,9 +41,7 @@ function parseFolderRow(row) {
   }
 }
 
-// Optimized: Use SQLite json_group_array for tree structure in database
 export async function loadFolderTree(db) {
-  // Single optimized query: SQLite builds the tree structure
   const result = await db.prepare(`
     SELECT
       f.category,
@@ -81,3 +79,4 @@ export async function loadFolderTree(db) {
 
   return result.results.map(parseFolderRow);
 }
+

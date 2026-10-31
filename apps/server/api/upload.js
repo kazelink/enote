@@ -106,7 +106,7 @@ async function validateMultipartFile(file) {
 
   const headerBytes = new Uint8Array(await file.slice(0, 32).arrayBuffer());
   const detectedType = detectMediaMime(headerBytes);
-  
+
   if (!detectedType || !ALLOWED_MIME.has(detectedType)) throw new Error('Invalid file');
   if (detectedType !== declaredType) throw new Error('MIME type mismatch');
 
@@ -127,7 +127,7 @@ async function handleRawUpload(c, declaredType) {
   }
 
   const ext = MIME_EXT[declaredType];
-  const filename = `tmp/${crypto.randomUUID()}.${ext}`;
+  const filename = `${crypto.randomUUID()}.${ext}`;
   const validatedStream = Readable.fromWeb(c.req.raw.body).pipe(createUploadValidationStream(declaredType));
 
   await bucket.put(filename, validatedStream);
@@ -160,7 +160,7 @@ router.post('/', authMiddleware, async (c) => {
     const detectedType = await validateMultipartFile(file);
 
     const ext = MIME_EXT[detectedType];
-    const filename = `tmp/${crypto.randomUUID()}.${ext}`;
+    const filename = `${crypto.randomUUID()}.${ext}`;
     await bucket.put(filename, file);
 
     return mediaResponse(c, filename, detectedType);
@@ -171,3 +171,4 @@ router.post('/', authMiddleware, async (c) => {
 });
 
 export default router;
+

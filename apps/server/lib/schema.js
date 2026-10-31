@@ -1,3 +1,5 @@
+import { db } from './core.js';
+
 const RETRY_DELAYS_MS = [0, 250, 750, 1500];
 const REQUIRED_TABLES = ['notes', 'folders', 'note_tags', 'note_media', 'notes_fts'];
 const REQUIRED_TRIGGERS = [
@@ -350,10 +352,10 @@ async function applySchema(db) {
 
   await runStatement(db, CREATE_NOTE_TAGS_TABLE_SQL);
   await ensureTableColumns(db, 'note_tags');
-  
+
   await runStatement(db, CREATE_NOTE_MEDIA_TABLE_SQL);
   await ensureTableColumns(db, 'note_media');
-  
+
   await runStatement(db, CREATE_NOTES_FTS_SQL);
   await syncNoteTags(db);
   await rebuildNotesFts(db);
@@ -375,8 +377,6 @@ async function applySchema(db) {
 }
 
 let schemaReadyPromise = null;
-
-import { db } from './core.js';
 
 export async function ensureSchema() {
   if (schemaReadyPromise) return schemaReadyPromise;
@@ -413,3 +413,4 @@ export async function ensureSchema() {
 
   return schemaReadyPromise;
 }
+

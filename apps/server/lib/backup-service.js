@@ -37,6 +37,12 @@ export function extractRestoreFolders(payload) {
   return payload && typeof payload === 'object' && Array.isArray(payload.folders) ? payload.folders : [];
 }
 
+function normalizeEntryTimestamps(entry, fallback) {
+  const createdAt = normalizeTimestamp(entry.createdAt || entry.created_at || fallback, fallback);
+  const updatedAt = normalizeTimestamp(entry.updatedAt || entry.updated_at || createdAt, createdAt);
+  return { createdAt, updatedAt };
+}
+
 export function normalizeRestoreEntry(entry) {
   if (!entry || typeof entry !== 'object' || !V.isUUID(entry.id)) return null;
 
@@ -45,8 +51,7 @@ export function normalizeRestoreEntry(entry) {
     ? `${entry.date}T00:00:00.000Z`
     : new Date().toISOString();
 
-  const createdAt = normalizeTimestamp(entry.createdAt || entry.created_at || fallbackTimestamp, fallbackTimestamp);
-  const updatedAt = normalizeTimestamp(entry.updatedAt || entry.updated_at || createdAt, createdAt);
+  const { createdAt, updatedAt } = normalizeEntryTimestamps(entry, fallbackTimestamp);
   const title = normalizeTitle(entry.title) || deriveImportedTitle(rawContent);
 
   if (!title) return null;
@@ -69,9 +74,7 @@ export function normalizeRestoreFolder(entry) {
   const category = normalizeFolderName(entry.category);
   if (!category) return null;
 
-  const fallbackTimestamp = new Date().toISOString();
-  const createdAt = normalizeTimestamp(entry.createdAt || entry.created_at || fallbackTimestamp, fallbackTimestamp);
-  const updatedAt = normalizeTimestamp(entry.updatedAt || entry.updated_at || createdAt, createdAt);
+  const { createdAt, updatedAt } = normalizeEntryTimestamps(entry, new Date().toISOString());
 
   return {
     category,
@@ -212,8 +215,6 @@ export async function restoreBackupStream(webBody, declaredBytes) {
     restoreFoldersInTransaction([...explicitFolders, ...derivedFolders.values()]);
     commitRestoreTransaction(transactionState);
 
-    // Restored notes bypass per-note note_media maintenance; refresh the index
-    // so media-cleanup decisions see their references.
     runBackground(rebuildNoteMediaIndex());
 
     return { success: true, count, skipped, folderCount: explicitFolderCount };
@@ -312,3 +313,4 @@ export async function createBackupExport(category, subcategory) {
 
   return { stream, filename, utfFilename };
 }
+

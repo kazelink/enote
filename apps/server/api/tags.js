@@ -40,8 +40,7 @@ router.put('/', authMiddleware, async (c) => {
         FROM json_each(notes.tags) j
         WHERE trim(CAST(j.value AS TEXT)) != ''
       )
-    ),
-    updated_at = CURRENT_TIMESTAMP
+    )
     WHERE EXISTS (
       SELECT 1 FROM json_each(notes.tags) j
       WHERE lower(trim(CAST(j.value AS TEXT))) = ?
@@ -52,3 +51,4 @@ router.put('/', authMiddleware, async (c) => {
 });
 
 export default router;
+

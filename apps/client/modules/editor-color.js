@@ -29,3 +29,4 @@ export const ColorPlugin = {
         document.addEventListener('mousedown', this._docHandler);
     }
 };
+

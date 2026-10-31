@@ -100,8 +100,8 @@ export async function swalUnsaved(saveCallback) {
             cancelButtonText: 'Cancel'
         });
         if (result.isConfirmed) return await saveCallback();
-        if (result.isDenied) return true;   // discard
-        return false;                       // cancel
+        if (result.isDenied) return true;
+        return false;
     } catch (e) {
         console.error(e);
         const wantSave = window.confirm('Save changes? OK=Save, Cancel=Choose discard/stay');
@@ -109,3 +109,4 @@ export async function swalUnsaved(saveCallback) {
         return window.confirm('Discard changes? OK=Discard, Cancel=Stay');
     }
 }
+

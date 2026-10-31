@@ -58,3 +58,4 @@ export function getBlockFromRange(range, root) {
     const block = node?.closest?.(BLOCK_SELECTOR);
     return block && block !== root && root.contains(block) ? block : null;
 }
+

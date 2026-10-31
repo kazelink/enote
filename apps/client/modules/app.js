@@ -1,27 +1,35 @@
 import { Utils, State, escapeHtml } from "./dom.js";
-import { API, authHeaders, Nonce, Token, getApiBase, setApiBase } from "./api.js";
+import { API, authHeaders, Nonce, Token, getApiBase, setApiBase, isDesktopShell } from "./api.js";
 import { UI } from "./ui.js";
 import { swalConfirm, swalAlert, swalPrompt } from "./swal.js";
 import { Editor } from "./editor.js?v=5.8";
 import { Auth } from "./auth.js";
 import * as LocalDB from "./localdb.js";
-import { startSyncEngine, syncNow, SyncStatus, queueNoteDelete } from "./sync.js";
+import { startSyncEngine, SyncStatus, queueNoteDelete } from "./sync.js";
+import { hydrateMedia, pruneOrphanMedia } from "./media.js";
 import { renderArchivePayload } from "../shared/render.js";
 
 const MAX_RESTORE_FILE_BYTES = 100 * 1024 * 1024;
 const STATUS_RESET_DELAY_MS = 2e3;
 const TAG_PREVIEW_LIMIT = 5;
+const STATE_KEYS = ["category", "subcategory", "note", "q", "tag"];
 
 function nextFrame() { return new Promise(r => requestAnimationFrame(r)); }
 function encodeInlineParam(val) { return encodeURIComponent(String(val ?? "")).replace(/'/g, "%27"); }
-/**
- * Point media URLs at the real server when the UI is served from a packaged
- * bundle. In a browser the API base is empty and this is a no-op.
- *
- * The token goes in the query string because native <img>/<video> requests
- * cannot attach headers, and cross-origin cookies are not sent without
- * SameSite=None + HTTPS, which a LAN setup usually does not have.
- */
+function byFolderNameKey(a, b) { return String(a || "").toLowerCase().localeCompare(String(b || "").toLowerCase()); }
+
+function normalizeServerUrl(raw) {
+  let value = String(raw || "").trim();
+  if (!value) return null;
+  if (!/^https?:\/\//i.test(value)) value = `http://${value}`;
+  value = value.replace(/\/+$/, "");
+  try {
+    new URL(value);
+    return value;
+  } catch {
+    return null;
+  }
+}
 function rewriteMediaUrls(html) {
   const base = getApiBase();
   if (!base) return html;
@@ -60,17 +68,6 @@ function renderLoading() {
 
 function getRestoreInput() { return Utils.$("restore-input"); }
 function clearRestoreInput() { const i = getRestoreInput(); if (i) i.value = ""; }
-function showRestoreMessage(kind, text) {
-  const box = Utils.$("restore-msg");
-  if (!box) return;
-  box.innerHTML = "";
-  if (text) {
-    const el = document.createElement("div");
-    el.className = kind === "error" ? "auth-err" : "auth-ok";
-    el.textContent = text;
-    box.appendChild(el);
-  }
-}
 
 function getDownloadFilename(disposition) {
   const utf = disposition.match(/filename\*=UTF-8''([^;]+)/i);
@@ -99,7 +96,7 @@ function normalizeState() {
     Object.assign(State, { category: "", subcategory: "", note: "", q: "", tag: "", page: 1 });
     return;
   }
-  ['category', 'subcategory', 'note', 'q', 'tag'].forEach(k => State[k] = String(State[k] || "").trim());
+  STATE_KEYS.forEach(k => State[k] = String(State[k] || "").trim());
   State.page = Number.isFinite(State.page) && State.page > 0 ? State.page : 1;
 
   if (!State.category) {
@@ -115,7 +112,7 @@ function normalizeState() {
 
 function syncStateFromLocation() {
   const p = new URLSearchParams(location.search);
-  ['category', 'subcategory', 'note', 'q', 'tag'].forEach(k => State[k] = p.get(k) || "");
+  STATE_KEYS.forEach(k => State[k] = p.get(k) || "");
   State.page = parseInt(p.get("page") || "1", 10);
   State.view = ["index", "category", "list", "note", "backup"].includes(p.get("view")) ? p.get("view") : "index";
   normalizeState();
@@ -124,10 +121,11 @@ function syncStateFromLocation() {
 function buildLocationSearch() {
   const p = new URLSearchParams();
   if (State.view !== "index") p.set("view", State.view);
-  ['category', 'subcategory', 'note', 'q', 'tag'].forEach(k => State[k] && p.set(k, State[k]));
+  STATE_KEYS.forEach(k => State[k] && p.set(k, State[k]));
   if (State.page > 1) p.set("page", String(State.page));
   const query = p.toString();
-  return query ? `?${query}` : location.pathname;
+  const path = location.pathname && location.pathname !== "/" ? location.pathname : "/main.html";
+  return query ? `${path}?${query}` : path;
 }
 
 function resetStatusLater(statusKind) {
@@ -155,12 +153,9 @@ const App = {
     ["home-entry-list", "category-entry-list", "entry-list"].forEach(id => {
       const el = Utils.$(id);
       if (!el) return;
-      // Keep existing rows visible while the next batch loads (stale-while-revalidate);
-      // only seed a loading placeholder when the container is empty.
       if (el.children.length === 0) {
         el.innerHTML = id === "home-entry-list" ? renderNotesHomeState() : renderLoading();
       }
-      // Drop any stale "loading" dimming before a fresh navigation renders.
       el.classList.remove("is-updating");
       const pg = el.closest(".view-container")?.querySelector("[data-pagination]");
       if (pg) pg.style.display = "none";
@@ -176,58 +171,98 @@ const App = {
     try { localStorage.setItem(COLLAPSE_STORAGE_KEY, JSON.stringify([...this._collapsedCategories])); } catch { }
   },
 
-  /**
-   * Kick off background sync and switch the UI to local data once the first
-   * pull succeeds. Before that the list is served by the server, so nothing
-   * looks empty while the local store is still filling up.
-   */
   _startLocalSync() {
     if (this._syncStarted) return;
     this._syncStarted = true;
 
     startSyncEngine();
+    this._renderSyncBadge(SyncStatus);
+
+    if (!this._dataChangedBound) {
+      this._dataChangedBound = true;
+      window.addEventListener("enote:data-changed", () => {
+        this._invalidateSidebarCaches();
+        if (Editor.wrapper && Editor.wrapper.style.display !== "none") return;
+        this.loadView({ quiet: true }).catch(() => {});
+      });
+    }
 
     SyncStatus.on((s) => {
+      this._renderSyncBadge(s);
+
       if (s.state !== "idle" || this._localReady) return;
       this._localReady = true;
-      // Sidebar caches were built from server responses; drop them so the
-      // folder tree and tag cloud are rebuilt from local data too.
       this._invalidateSidebarCaches();
       this.loadView({ quiet: true }).catch(() => {});
+
+      pruneOrphanMedia().catch(() => {});
     });
   },
 
-  /**
-   * Packaged shells (Tauri / Capacitor) serve the UI from the app bundle, so a
-   * relative `/api/...` would resolve against that bundle instead of the real
-   * server. Ask for the server address once and persist it in localStorage.
-   * In a browser this is a no-op.
-   */
-  async _ensureServerAddress() {
-    const isShell = location.hostname === "tauri.localhost"
-      || location.protocol === "tauri:"
-      || Boolean(window.__TAURI_INTERNALS__);
+  _renderSyncBadge(s) {
+    const el = Utils.$("sync-stat");
+    if (!el) return;
 
-    if (!isShell || getApiBase()) return true;
+    clearTimeout(this._syncBadgeHideTimer);
+    clearTimeout(this._syncBadgeShowTimer);
+    el.title = "";
+
+    const pending = Number(s.pending) || 0;
+
+    if (s.state === "idle" && !s.lastSyncAt) {
+      el.textContent = pending ? `待上传 ${pending}` : "";
+      el.className = pending ? "sync-stat active" : "sync-stat";
+      return;
+    }
+
+    if (s.state === "idle") {
+      if (pending) {
+        el.textContent = `待上传 ${pending}`;
+        el.className = "sync-stat active";
+      } else if (s.didWork) {
+        el.textContent = "已同步";
+        el.className = "sync-stat active success";
+        this._syncBadgeHideTimer = setTimeout(() => {
+          el.textContent = "";
+          el.className = "sync-stat";
+        }, STATUS_RESET_DELAY_MS);
+      } else {
+        el.textContent = "";
+        el.className = "sync-stat";
+      }
+    } else if (s.state === "syncing") {
+      this._syncBadgeShowTimer = setTimeout(() => {
+        el.textContent = "同步中";
+        el.className = "sync-stat active";
+      }, 400);
+    } else if (s.state === "offline") {
+      el.textContent = "离线 · 本地可用";
+      el.className = "sync-stat active warn";
+    } else if (s.state === "error") {
+      el.textContent = "同步失败";
+      el.className = "sync-stat active error";
+      el.title = s.lastError ? `同步失败：${s.lastError}` : "同步失败，稍后自动重试";
+    } else {
+      el.textContent = "需重新登录";
+      el.className = "sync-stat active warn";
+      el.title = "登录状态已失效，请重新输入密码";
+    }
+  },
+
+  async _ensureServerAddress() {
+    if (!isDesktopShell() || getApiBase()) return true;
 
     for (let attempt = 0; attempt < 5; attempt++) {
       const entered = await swalPrompt(
         "Server Address",
-        "Enter the eNote server URL, for example http://192.168.1.20:3000",
-        "http://192.168.1.20:3000"
+        "Enter the eNote server URL",
+        ""
       );
 
       if (!entered) continue;
 
-      let normalized = String(entered).trim();
-      if (!/^https?:\/\//i.test(normalized)) normalized = `http://${normalized}`;
-      normalized = normalized.replace(/\/+$/, "");
-
-      try {
-        new URL(normalized);
-      } catch {
-        continue;
-      }
+      const normalized = normalizeServerUrl(entered);
+      if (!normalized) continue;
 
       setApiBase(normalized);
       return true;
@@ -240,10 +275,6 @@ const App = {
     try {
       Auth.init(); Editor.init();
 
-      // SweetAlert's container is z-index 2400 while the login overlay is 9999,
-      // so any dialog opened from the auth screen renders underneath it and the
-      // click looks like it did nothing. Injected at runtime rather than fixed
-      // in the stylesheet, which browsers may still hold a cached copy of.
       const dialogLayer = document.createElement("style");
       dialogLayer.textContent = ".swal2-container{z-index:10000!important}";
       document.head.appendChild(dialogLayer);
@@ -253,24 +284,15 @@ const App = {
       window.App = this;
       this._setupHtmxListeners();
       this._setupTreeContextMenu();
+      this._disableNativeContextMenu();
       UI.initGlobalEvents();
 
-      // Show the shell before anything that can await on network or user input.
-      // `body` starts at opacity 0 and only becomes visible with this class, so
-      // a transparent body would also hide the server-address dialog (it is
-      // appended inside body) and deadlock init waiting for an invisible prompt.
       document.body.classList.add("ready");
 
-      // Runs after the UI is ready (the prompt needs it) but before any API
-      // request: in a packaged shell this resolves the server URL.
       await this._ensureServerAddress();
+      this._renderAuthServerAddress();
 
       if (Nonce.get() && Token.get()) {
-        // No dedicated auth-status probe: the first data request doubles as the
-        // auth check, and a 401 lands in the API layer's showAuth() path. This
-        // saves one serial round trip on every cold load.
-        // Decide local-vs-server BEFORE the first render: on an offline start
-        // the sidebar must not fire requests that are bound to fail.
         this._localReady = (await LocalDB.readMeta("initialized", 0)) === 1;
         this._startLocalSync();
         await this.loadView();
@@ -300,21 +322,10 @@ const App = {
   },
 
   async loadView(options = {}) {
-    // On a slow link, responses from an abandoned navigation can arrive after a
-    // newer one; each loadView invalidates all earlier in-flight renders.
     const seq = ++this._loadSeq;
-    // A page turn keeps the current list and pagination in place so the row of
-    // page controls never flickers; only fresh navigations reset content.
     if (!options.quiet && !options.pageTurn) this._resetListContent();
-    // In-place navigations (page turn, tree, tag, breadcrumb, back) all report
-    // progress next to the control that was used, so the header spinner stays out.
     const inPlaceNav = !!(options.pageTurn || options.treeNav || options.navPending);
-    // Set here rather than in changePage(): route() bails out when the user
-    // cancels the unsaved-changes dialog, and a page control marked busy at
-    // click time would then be stuck spinning forever.
     if (options.pageTurn) this._setPaginationBusy(options.dir);
-    // Same idea for tree navigation: the click handler only passes the target,
-    // and the pending marker is applied once the navigation is committed.
     if (options.treeNav) this._pendingTree = options.treeNav;
     if (options.navPending) this._pendingNav = options.navPending;
     syncStateFromLocation();
@@ -330,8 +341,6 @@ const App = {
       backBtn.classList.toggle("is-loading", this._pendingNav?.kind === "back");
     }
 
-    // The backup entry is a corner action on the home list only; elsewhere it
-    // would float over content that already has its own controls.
     const backupFab = Utils.$("btn-backup");
     if (backupFab) backupFab.classList.toggle("visible", State.view === "index");
 
@@ -349,6 +358,7 @@ const App = {
       if (el) {
         if (this._currentNote?.id === id) {
           el.innerHTML = this._renderNoteDetail(this._currentNote);
+          hydrateMedia(el).catch(() => {});
         } else {
           el.innerHTML = renderLoading();
         }
@@ -356,7 +366,6 @@ const App = {
     }
 
     if (State.view === "backup") {
-      // This branch returns before the block that clears transient loading state.
       this._clearTreePending(seq);
       this._clearNavPending(seq);
       try {
@@ -404,13 +413,8 @@ const App = {
     if (!el) return;
     const viewEl = el.closest(".view-container");
     if (!el.children.length) el.innerHTML = renderLoading();
-    // Dim whatever is on screen (old rows or the placeholder) while the next
-    // batch is on the wire, so the swap reads as an in-place update.
     el.classList.add("is-updating");
     try {
-      // Treat the local store as ready once a sync or a local save has
-      // initialised it; before that fall back to the server so a fresh
-      // install renders immediately instead of showing an empty list.
       if (!this._localReady && (await LocalDB.readMeta("initialized", 0)) === 1) {
         this._localReady = true;
       }
@@ -422,8 +426,6 @@ const App = {
       this._clearPaginationBusy(el);
       const pgData = viewEl?.querySelector(".pg-data");
       State.data.totalPg = parseInt(pgData?.dataset.total, 10) || 1;
-      // The server clamps an out-of-range page; mirror it so prev/next stay in
-      // sync with what the user actually sees.
       const shownPage = parseInt(pgData?.dataset.page, 10);
       if (Number.isFinite(shownPage) && shownPage > 0) State.page = shownPage;
     } catch (e) {
@@ -432,11 +434,6 @@ const App = {
     }
   },
 
-  /**
-   * Render the note list from the local store using the shared templates, so
-   * the markup is byte-identical to what the server would have produced.
-   * Mirrors the server query semantics in list.js.
-   */
   async _renderLocalList(params = {}) {
     const page = Number(params.page) || 1;
     const size = Number(params.size) || 10;
@@ -459,10 +456,6 @@ const App = {
     });
   },
 
-  /**
-   * Folder tree derived from local notes, matching the shape returned by
-   * /api/folders/tree: [{ category, count, updated_at, subfolders: [...] }].
-   */
   async _localFolderTree() {
     const rows = await LocalDB.allNotes();
     const cats = new Map();
@@ -489,17 +482,27 @@ const App = {
       }
     }
 
-    return [...cats.values()]
-      .sort((a, b) => a.category.toLowerCase().localeCompare(b.category.toLowerCase()))
-      .map((c) => ({
-        category: c.category,
-        count: c.count,
-        updated_at: c.updated_at,
-        subfolders: [...c.subfolders.values()]
-      }));
+    return [...cats.values()].map((c) => ({
+      category: c.category,
+      count: c.count,
+      updated_at: c.updated_at,
+      subfolders: [...c.subfolders.values()]
+    }));
   },
 
-  /** Tag cloud derived from local notes, matching /api/tags: [{ tag, count }]. */
+  _normalizeFolderTree(tree) {
+    if (!Array.isArray(tree)) return [];
+
+    return tree
+      .map((row) => ({
+        ...row,
+        subfolders: (Array.isArray(row?.subfolders) ? row.subfolders : [])
+          .slice()
+          .sort((a, b) => byFolderNameKey(a?.subcategory, b?.subcategory))
+      }))
+      .sort((a, b) => byFolderNameKey(a?.category, b?.category));
+  },
+
   async _localTags() {
     const rows = await LocalDB.allNotes();
     const counts = new Map();
@@ -522,13 +525,12 @@ const App = {
   async _loadFolderTree(force = false) {
     const target = Utils.$("folder-tree");
     if (!target) return;
-    if (!force && this._folderTreeCache) return (this._renderFolderTree(), this._updateDatalists());
+    if (!force && this._folderTreeCache) return this._renderFolderTree();
     if (!target.querySelector('.tree-group')) target.innerHTML = renderLoading();
 
     const tree = this._localReady ? await this._localFolderTree() : await API.req("folders/tree");
-    this._folderTreeCache = Array.isArray(tree) ? tree : [];
+    this._folderTreeCache = this._normalizeFolderTree(tree);
     this._renderFolderTree();
-    this._updateDatalists();
   },
 
   async _loadTagCloud(force = false) {
@@ -674,8 +676,6 @@ const App = {
     this._syncFolderPanelControls();
   },
 
-  // The pending folder swaps its count pill for an inline spinner, mirroring the
-  // page-turn feedback: the thing you clicked shows the loading state itself.
   _treeCountCell(count, isPending) {
     return isPending
       ? '<span class="tree-count tree-count-loading"><span class="tree-spin"></span></span>'
@@ -683,20 +683,15 @@ const App = {
   },
 
   _clearTreePending(seq) {
-    // A superseded load must not clear the marker of a newer navigation.
     if (!this._pendingTree || (seq !== undefined && seq !== this._loadSeq)) return;
     this._pendingTree = null;
     this._renderFolderTree();
   },
 
-  // Tag chips, breadcrumbs and the back button all report their own progress, so
-  // clearing means refreshing whichever of those surfaces is on screen.
   _clearNavPending(seq) {
     const pending = this._pendingNav;
     if (!pending || (seq !== undefined && seq !== this._loadSeq)) return;
     this._pendingNav = null;
-    // Clear only the surface that was actually marked, so a failed tag-cloud
-    // fetch is never mistaken for an empty tag list.
     if (pending.kind === "tag") { if (this._tagCloudCache) this._renderTagCloud(); }
     else if (pending.kind === "crumb") UI.renderBreadcrumb(this._breadcrumbContext());
     else if (pending.kind === "back") Utils.$("btn-header-back")?.classList.remove("is-loading");
@@ -724,22 +719,29 @@ const App = {
     };
   },
 
+  _paintNoteDetail(el, note) {
+    UI.renderBreadcrumb(this._breadcrumbContext());
+    el.innerHTML = this._renderNoteDetail(note);
+    this._renderFolderTree();
+  },
+
   async _loadNote() {
     const el = Utils.$("note-detail");
     if (!el) return;
     const id = String(State.note || "").trim();
     if (this._currentNote?.id === id) {
-      UI.renderBreadcrumb(this._breadcrumbContext()); el.innerHTML = this._renderNoteDetail(this._currentNote); this._renderFolderTree();
-      // Just saved: the save response was the canonical content, skip the refetch.
+      this._paintNoteDetail(el, this._currentNote);
       if (this._currentNoteFresh) { this._currentNoteFresh = false; return; }
     } else el.innerHTML = renderLoading();
 
-    const note = await API.req("list", { id });
+    const local = this._localReady ? await LocalDB.getNote(id) : null;
+    const note = local || await API.req("list", { id });
     if (String(State.note || "").trim() !== id) return;
 
     if (!note?.id) { el.innerHTML = '<div class="loading-hint">Note not found.</div>'; this._currentNote = null; return; }
     this.primeSavedNote(note);
-    UI.renderBreadcrumb(this._breadcrumbContext()); el.innerHTML = this._renderNoteDetail(note); this._renderFolderTree();
+    this._paintNoteDetail(el, note);
+    hydrateMedia(el).catch(() => {});
   },
 
   _renderNoteDetail(note) {
@@ -768,6 +770,10 @@ const App = {
     document.addEventListener("contextmenu", e => { if (!e.target.closest("#folder-tree") && !e.target.closest("#tree-context-menu")) this.closeTreeContextMenu(); });
     window.addEventListener("scroll", () => this.closeTreeContextMenu(), { passive: true });
     window.addEventListener("resize", () => this.closeTreeContextMenu());
+  },
+
+  _disableNativeContextMenu() {
+    document.addEventListener("contextmenu", e => e.preventDefault());
   },
 
   openTreeContextMenu(event, scope = "root", encodedCategory = "", encodedSubcategory = "", encodedTag = "") {
@@ -930,12 +936,10 @@ const App = {
     }
   },
 
-  /** Opens the backup / restore view. */
   openBackup() {
     this.route({ view: "backup" }, { quiet: true });
   },
 
-  /** Expands/collapses the inline server field on the login card. */
   toggleServerPanel() {
     const panel = Utils.$("auth-server-panel");
     const input = Utils.$("auth-server-input");
@@ -944,8 +948,6 @@ const App = {
 
     const willOpen = panel.hasAttribute("hidden");
 
-    // Closing is the common case once the address has been checked, so the
-    // button doubles as a toggle instead of stacking more dialogs.
     if (!willOpen) {
       panel.setAttribute("hidden", "");
       return;
@@ -957,13 +959,27 @@ const App = {
       hint.className = "auth-server-hint";
     }
     if (input) {
-      input.value = getApiBase() || "";
+      input.value = "";
       input.focus();
-      input.select();
     }
   },
 
-  /** Validates, probes, then stores the address typed into the inline panel. */
+  _renderAuthServerAddress() {
+    const el = Utils.$("auth-server-current");
+    if (!el) return;
+
+    const base = getApiBase();
+    if (!base) {
+      el.hidden = true;
+      el.textContent = "";
+      return;
+    }
+
+    el.hidden = false;
+    el.textContent = base;
+    el.title = `当前服务器：${base}（点击修改）`;
+  },
+
   async saveServerAddress() {
     const input = Utils.$("auth-server-input");
     const hint = Utils.$("auth-server-hint");
@@ -973,79 +989,58 @@ const App = {
       hint.className = `auth-server-hint${kind ? ` ${kind}` : ""}`;
     };
 
-    let value = String(input?.value || "").trim();
+    if (!String(input?.value || "").trim()) {
+      setHint("Please enter a server address", "error");
+      return;
+    }
+
+    const value = normalizeServerUrl(input?.value);
     if (!value) {
-      setHint("请输入服务器地址", "error");
-      return;
-    }
-    if (!/^https?:\/\//i.test(value)) value = `http://${value}`;
-    value = value.replace(/\/+$/, "");
-
-    try {
-      new URL(value);
-    } catch {
-      setHint("地址格式不正确，例如 http://192.168.1.20:3000", "error");
+      setHint("Invalid address, e.g. http://192.168.1.20:3000", "error");
       return;
     }
 
-    setHint("正在连接…", "");
+    setHint("Connecting...", "");
     const probe = await this._probeServer(value);
     if (!probe.ok) {
-      setHint(`连接失败：${probe.reason}`, "error");
+      setHint(`Connection failed: ${probe.reason}`, "error");
       return;
     }
 
     setApiBase(value);
-    setHint("已连接，正在重新载入…", "ok");
+    setHint("Connected, reloading...", "ok");
     location.reload();
   },
 
-  /**
-   * Lets the user point this client at a different server. Mainly for the
-   * packaged app: a browser build already talks to its own origin.
-   */
   async openServerSettings() {
     const entered = await swalPrompt(
       "Server Address",
-      "服务器地址，例如 http://192.168.1.20:3000",
+      "e.g. http://192.168.1.20:3000",
       "http://192.168.1.20:3000",
       getApiBase()
     );
 
     if (entered == null) return;
 
-    let normalized = String(entered).trim();
-    if (!normalized) return;
-    if (!/^https?:\/\//i.test(normalized)) normalized = `http://${normalized}`;
-    normalized = normalized.replace(/\/+$/, "");
-
-    try {
-      new URL(normalized);
-    } catch {
-      await swalAlert("地址格式不正确", "请输入形如 http://192.168.1.20:3000 的地址", "error");
+    const normalized = normalizeServerUrl(entered);
+    if (!normalized) {
+      await swalAlert("Invalid address", "Please enter an address like http://192.168.1.20:3000", "error");
       return;
     }
 
-    // Probe before saving. Without this an unreachable address just reloads
-    // into a login screen that silently fails, which looks like a freeze.
     const probe = await this._probeServer(normalized);
     if (!probe.ok) {
       const keep = await swalConfirm(
-        "无法连接服务器",
-        `${normalized}\n\n${probe.reason}\n\n仍然保存这个地址吗？`
+        "Cannot reach the server",
+        `${normalized}\n\n${probe.reason}\n\nSave this address anyway?`
       );
       if (!keep) return;
     }
 
     setApiBase(normalized);
-    // A full reload is the simplest way to re-run init against the new origin.
     location.reload();
   },
 
-  /**
-   * Checks that a server answers before it is saved. A 401/404 still proves the
-   * host is there, so only transport errors and 5xx count as failures.
-   */
   async _probeServer(base) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 6000);
@@ -1056,14 +1051,14 @@ const App = {
         signal: controller.signal
       });
 
-      if (res.status >= 500) return { ok: false, reason: `服务器返回 HTTP ${res.status}` };
+      if (res.status >= 500) return { ok: false, reason: `Server returned HTTP ${res.status}` };
       return { ok: true };
     } catch (error) {
       return {
         ok: false,
         reason: error?.name === "AbortError"
-          ? "连接超时（6 秒无响应）"
-          : "网络不可达，请检查地址、端口和防火墙"
+          ? "Connection timed out (no response in 6s)"
+          : "Network unreachable — check address, port and firewall"
       };
     } finally {
       clearTimeout(timer);
@@ -1074,8 +1069,6 @@ const App = {
   async editEntry(btn, id) {
     if (!await Editor.close()) return;
     const row = btn?.closest(".note-detail-shell, .archive-row") || (State.view === "note" ? Utils.$("note-detail")?.querySelector(".note-detail-shell") : null);
-    // Read the note from the local store so editing also works offline; the
-    // server is only consulted if the record is not cached yet.
     const target = this._currentNote?.id === id
       ? this._currentNote
       : (await LocalDB.getNote(id)) || await API.req("list", { id });
@@ -1087,9 +1080,6 @@ const App = {
     document.querySelectorAll(`.archive-row[data-id="${CSS.escape(id)}"]`).forEach(el => el.remove());
     await withLoading(async () => {
       if (this._localReady) {
-        // Tombstone locally first: the row disappears immediately and the
-        // deletion survives a refresh even while offline. The sync engine
-        // forwards it once connectivity returns.
         await queueNoteDelete(id);
       } else {
         await API.req("delete", { id }, "DELETE");
@@ -1104,8 +1094,6 @@ const App = {
   changePage(dir) {
     const n = State.page + dir;
     if (n < 1 || n > State.data.totalPg) return;
-    // Navigate quietly so the global header spinner stays out of the way; the
-    // inline spinner is applied by loadView() once the navigation is committed.
     this.route({ page: n }, { pageTurn: true, dir });
   },
 
@@ -1141,49 +1129,33 @@ const App = {
 
   async restoreBackup(file) {
     if (!file || this._restoreInFlight) return;
-    this._restoreInFlight = true; UI.setStatus("loading"); showRestoreMessage("info", "Uploading backup...");
+    this._restoreInFlight = true; UI.setStatus("loading");
     try {
       if (file.size > MAX_RESTORE_FILE_BYTES) throw new Error("Backup file too large (max 100MB).");
       await nextFrame();
-      const res = await fetch("/api/backup/restore", { method: "POST", headers: authHeaders({ "Content-Type": "application/json", "X-Backup-Upload": "file", "X-Backup-Size": String(file.size) }), body: file, credentials: "include", cache: "no-store" });
+      const res = await fetch(`${getApiBase()}/api/backup/restore`, { method: "POST", headers: authHeaders({ "Content-Type": "application/json", "X-Backup-Upload": "file", "X-Backup-Size": String(file.size) }), body: file, credentials: "include", cache: "no-store" });
       if (res.status === 401) { Nonce.clear(); Token.clear(); UI.showAuth(); throw new Error("Unauthorized"); }
-      showRestoreMessage("info", "Restoring backup...");
       const payload = (res.headers.get("content-type") || "").toLowerCase().includes("application/json") ? await res.json().catch(() => null) : { error: await res.text().catch(() => "") };
       if (!res.ok) throw new Error(payload?.error || "Restore failed.");
 
       const count = Number(payload?.count ?? 0), skipped = Number(payload?.skipped ?? 0);
-      showRestoreMessage("success", `Restore successful. Processed ${count} notes, skipped ${skipped} invalid notes.`);
       UI.setStatus("ok"); resetStatusLater("ok"); this._invalidateSidebarCaches(); await this.loadView();
       swalAlert("Restore Complete", `Notes processed: ${count}\nInvalid skipped: ${skipped}`, "success");
     } catch (e) {
-      showRestoreMessage("error", `Restore Failed: ${e?.message || "Restore failed."}`); UI.setStatus("err"); resetStatusLater("err");
+      UI.setStatus("err"); resetStatusLater("err");
+      swalAlert("Restore Failed", e?.message || "Restore failed.", "error");
     } finally { clearRestoreInput(); this._restoreInFlight = false; }
   },
   async downloadBackup() {
     UI.setStatus("loading");
     try {
       const cat = Utils.$("backup-category")?.value?.trim() === '(All Categories)' ? '' : Utils.$("backup-category")?.value?.trim() || "";
-      const res = await fetch(`/api/backup/export${cat ? `?category=${encodeURIComponent(cat)}` : ""}`, { headers: authHeaders() });
+      const res = await fetch(`${getApiBase()}/api/backup/export${cat ? `?category=${encodeURIComponent(cat)}` : ""}`, { headers: authHeaders() });
       if (res.status === 401) { Nonce.clear(); Token.clear(); UI.showAuth(); throw new Error("Unauthorized"); }
-      if (!res.ok) throw new Error((await res.json().catch(() => { })).error || "Download failed");
+      if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.error || "Download failed");
       await saveResponseToFile(res, getDownloadFilename(res.headers.get("content-disposition") || ""));
       UI.setStatus("");
     } catch (e) { if (e?.name !== "AbortError") { console.error("Download failed:", e); UI.setStatus("err"); } else UI.setStatus(""); }
-  },
-
-  _updateDatalists() {
-    const catList = Utils.$("category-options"), subList = Utils.$("subcategory-options");
-    if (!catList || !subList) return;
-    const catSeen = new Set(), subSeen = new Set(), catHtml = [], subHtml = [];
-    (this._folderTreeCache || []).forEach(r => {
-      const cat = String(r?.category || "").trim();
-      if (cat && !catSeen.has(cat)) { catSeen.add(cat); catHtml.push(`<option value="${escapeHtml(cat)}"></option>`); }
-      (Array.isArray(r?.subfolders) ? r.subfolders : []).forEach(s => {
-        const sub = String(s?.subcategory || "").trim();
-        if (sub && !subSeen.has(sub)) { subSeen.add(sub); subHtml.push(`<option value="${escapeHtml(sub)}"></option>`); }
-      });
-    });
-    catList.innerHTML = catHtml.join(''); subList.innerHTML = subHtml.join('');
   },
 
   _setupHtmxListeners() {
@@ -1191,9 +1163,6 @@ const App = {
       const nonce = Nonce.get();
       if (nonce) e.detail.headers["X-Session-Nonce"] = nonce;
 
-      // htmx paths in the markup are absolute (`/api/login`). In a packaged
-      // shell the page origin is the app bundle, so those must be prefixed with
-      // the configured server, otherwise Tauri looks for a local asset.
       const base = getApiBase();
       if (base && typeof e.detail.path === "string"
         && e.detail.path.startsWith("/") && !e.detail.path.startsWith("//")) {
@@ -1202,14 +1171,11 @@ const App = {
     });
     document.addEventListener("htmx:beforeRequest", e => { if (e.target.id !== "auth-form") UI.setStatus("loading"); });
 
-    // A transport-level failure (server down, wrong address, firewall) produces
-    // no HTTP response at all, so htmx renders nothing and the login just spins.
-    // Surface it on the login card instead.
     document.addEventListener("htmx:sendError", e => {
       if (e.target?.id !== "auth-form") return;
       const msg = Utils.$("auth-messages");
       if (msg) {
-        msg.innerHTML = '<div class="auth-err">无法连接服务器。请检查网络，或点击下方「服务器设置」更改地址。</div>';
+        msg.innerHTML = '<div class="auth-err">Cannot reach the server. Check your network, or open "Server" below to change the address.</div>';
       }
     });
     document.addEventListener("change", async e => {
@@ -1223,3 +1189,4 @@ const App = {
 };
 
 App.init();
+

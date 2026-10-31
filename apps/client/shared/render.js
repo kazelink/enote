@@ -1,15 +1,3 @@
-/**
- * Shared rendering module — imported by BOTH the Node server and the browser.
- *
- * Keeping templates here is what makes "one implementation, three targets"
- * possible: the cloud server renders list pages for the web client, and the
- * desktop/mobile clients render the exact same markup from their local
- * database. No forked template copies, no drift.
- *
- * Rules for this file:
- * - No Node built-ins, no browser-only APIs — pure functions only.
- * - Every user-controlled value must go through escapeHtml().
- */
 
 const ESC_MAP = {
     '&': '&amp;',
@@ -106,10 +94,6 @@ export function renderArchiveEmptyState({ hasFolderScope, hasAnyFilter }) {
         : 'No notes in your library yet.';
 }
 
-/**
- * Compose the list payload the way the server does for HX requests, so the
- * client can swap in a locally rendered list without any other change.
- */
 export function renderArchivePayload({ notes, page, totalPages, hasFolderScope, hasAnyFilter }) {
     const body = notes.length
         ? renderArchiveList(notes)
@@ -117,3 +101,4 @@ export function renderArchivePayload({ notes, page, totalPages, hasFolderScope, 
 
     return `${body}${renderPagination(page, totalPages)}`;
 }
+

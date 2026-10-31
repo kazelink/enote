@@ -45,3 +45,4 @@ export function createImagesRouter(routeBase) {
 
   return router;
 }
+

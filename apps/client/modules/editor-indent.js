@@ -60,3 +60,4 @@ export const IndentPlugin = {
         return /\.indent(?:\.|>|\[|$)/.test(path);
     }
 };
+

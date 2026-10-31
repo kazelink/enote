@@ -23,3 +23,7 @@ src-tauri/gen/
 
 # AI tool config
 .claude/
+
+# Android build output
+dist-android/
+*.apk

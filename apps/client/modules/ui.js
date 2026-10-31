@@ -1,6 +1,5 @@
 import { Utils, RI_SVGS, loadScript } from './dom.js';
 
-
 const AUTH_ARROW_SVG = '<svg viewBox="0 0 24 24"><path d="M16.172 11l-5.364-5.364 1.414-1.414L20 12l-7.778 7.778-1.414-1.414L16.172 13H4v-2z"></path></svg>';
 
 const STATUS_ICONS = {
@@ -155,14 +154,13 @@ export const UI = {
 
         overlay.classList.add('active');
         resetAuthUi();
+        window.App?._renderAuthServerAddress?.();
 
         const inputEl = Utils.$('auth-input');
         if (inputEl) {
             inputEl.value = '';
-            // Immediate focus attempt
             inputEl.focus({ preventScroll: true });
 
-            // Native event-driven focus when transition completes
             const focusOnReady = (e) => {
                 if (e.propertyName === 'opacity') {
                     inputEl.focus({ preventScroll: true });
@@ -190,3 +188,4 @@ export const UI = {
         });
     }
 };
+

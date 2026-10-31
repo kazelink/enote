@@ -17,6 +17,7 @@ import { db } from '../lib/core.js';
 import {
   getLatestSeq,
   getLatestSeqByNoteIds,
+  getMinSeq,
   getNotesByIds,
   listAllFolders,
   listChangesSince
@@ -43,9 +44,6 @@ function toClientNote(row, seq) {
   };
 }
 
-// A client that has never synced sends since=0 and gets the folder tree too;
-// afterwards folders are derived from notes, which avoids shipping them on
-// every incremental pull (they are a projection of notes anyway).
 router.get('/state', authMiddleware, async (c) => {
   const latestSeq = await getLatestSeq();
   const notes = await db.prepare('SELECT COUNT(*) AS n FROM notes').first();
@@ -68,19 +66,34 @@ router.get('/pull', authMiddleware, async (c) => {
     : DEFAULT_PULL_LIMIT;
 
   const latestSeq = await getLatestSeq();
+
+  if (since > 0) {
+    const minSeq = await getMinSeq();
+    if (!minSeq || since < minSeq - 1) {
+      return c.json({
+        notes: [],
+        deleted: [],
+        nextSeq: 0,
+        latestSeq,
+        hasMore: false,
+        fullReset: true,
+        serverTime: new Date().toISOString(),
+        folders: await listAllFolders()
+      });
+    }
+  }
+
   const changes = await listChangesSince(since, limit);
 
   if (!changes.length) {
     return c.json({
       notes: [],
       deleted: [],
-      // Jump straight to the newest cursor: folder rows live in the same stream
-      // but are never served here, so leaving the cursor behind would rescan
-      // the same empty window on every pull.
       nextSeq: latestSeq,
       latestSeq,
       hasMore: false,
       fullReset: false,
+      serverTime: new Date().toISOString(),
       ...(since === 0 ? { folders: await listAllFolders() } : {})
     });
   }
@@ -98,8 +111,6 @@ router.get('/pull', authMiddleware, async (c) => {
     }
 
     const row = rowMap.get(ch.entity_id);
-    // An upsert whose row is gone means the note was removed after that write
-    // (hard delete), so the client must delete it too rather than keep a stale copy.
     if (!row) {
       deleted.push({ id: ch.entity_id, seq: ch.seq });
       continue;
@@ -120,6 +131,7 @@ router.get('/pull', authMiddleware, async (c) => {
     latestSeq,
     hasMore: Boolean(remaining),
     fullReset: false,
+    serverTime: new Date().toISOString(),
     ...(since === 0 ? { folders: await listAllFolders() } : {})
   });
 });
@@ -167,8 +179,19 @@ function normalizeIncomingNote(input) {
   };
 }
 
-router.post('/push', authMiddleware, async (c) => {
-  const { value: body, response } = await parseJsonBody(c);
+function sameNoteContent(existing, note) {
+  if (existing.title !== note.title) return false;
+  if (existing.category !== note.category) return false;
+  if (existing.subcategory !== note.subcategory) return false;
+  if (existing.content !== note.content) return false;
+  if (String(existing.updated_at).slice(0, 19) !== String(note.updatedAt).slice(0, 19)) return false;
+
+  const stored = parseStoredTags(existing.tags).map(String).sort();
+  const incoming = (note.tags || []).map(String).sort();
+  return stored.length === incoming.length && stored.every((t, i) => t === incoming[i]);
+}
+
+router.post('/push', authMiddleware, async (c) => {  const { value: body, response } = await parseJsonBody(c);
   if (response) return response;
 
   const incomingNotes = Array.isArray(body?.notes) ? body.notes : [];
@@ -201,50 +224,80 @@ router.post('/push', authMiddleware, async (c) => {
 
   const allIds = [...new Set([...parsedNotes.map((n) => n.id), ...deletionIds.map((d) => d.id)])];
   const latestByNote = await getLatestSeqByNoteIds(allIds);
+  const sanitizedNotes = await Promise.all(
+    parsedNotes.map(async (note) => ({ ...note, content: await sanitizeContent(note.content) }))
+  );
 
   const conflicts = [];
   const appliedNotes = [];
-  const appliedDeletions = [];
+  const confirmed = [];
+  const copyIds = new Set();
 
-  for (const note of parsedNotes) {
+  for (const note of sanitizedNotes) {
     const serverSeq = latestByNote.get(note.id) || 0;
 
-    // Optimistic concurrency: the client edited on top of `baseSeq`. If the
-    // server has moved past that, another device wrote in between. We keep the
-    // incoming version (last-write-wins) but report it so the UI can flag it,
-    // instead of silently discarding either side.
     if (serverSeq > note.baseSeq) {
+      const existing = await db.prepare('SELECT * FROM notes WHERE id = ?').bind(note.id).first();
+
+      if (existing && sameNoteContent(existing, note)) {
+        confirmed.push({ id: note.id, seq: serverSeq });
+        continue;
+      }
+
+      let copyId = null;
+      if (existing) {
+        copyId = crypto.randomUUID();
+        copyIds.add(copyId);
+        appliedNotes.push({
+          id: copyId,
+          title: `${existing.title}（冲突副本）`,
+          category: existing.category,
+          subcategory: existing.subcategory,
+          tags: parseStoredTags(existing.tags),
+          content: existing.content,
+          createdAt: existing.created_at,
+          updatedAt: existing.updated_at
+        });
+      }
+
       conflicts.push({
         id: note.id,
         kind: 'update',
         baseSeq: note.baseSeq,
         serverSeq,
-        resolution: 'client_wins'
+        resolution: 'client_wins',
+        copyId
       });
     }
 
     appliedNotes.push(note);
+    confirmed.push({ id: note.id, seq: null });
   }
 
   const noteIdsToDelete = [];
   for (const item of deletionIds) {
     const serverSeq = latestByNote.get(item.id) || 0;
     if (serverSeq > item.baseSeq) {
+      const existing = await db.prepare('SELECT * FROM notes WHERE id = ?').bind(item.id).first();
+
       conflicts.push({
         id: item.id,
         kind: 'delete',
         baseSeq: item.baseSeq,
         serverSeq,
-        resolution: 'client_wins'
+        resolution: 'server_wins',
+        note: existing ? toClientNote(existing, serverSeq) : null
       });
+      continue;
     }
     noteIdsToDelete.push(item.id);
   }
 
   const statements = [];
+  const sanitizedContents = await Promise.all(appliedNotes.map((note) => sanitizeContent(note.content)));
 
-  for (const note of appliedNotes) {
-    const sanitized = await sanitizeContent(note.content);
+  appliedNotes.forEach((note, index) => {
+    const sanitized = sanitizedContents[index];
     const tagsJson = serializeTags(note.tags);
 
     statements.push(
@@ -260,14 +313,13 @@ router.post('/push', authMiddleware, async (c) => {
       )
     );
 
-    // Rebuild the media index in the same transaction as the content it mirrors.
     statements.push(db.prepare('DELETE FROM note_media WHERE note_id = ?').bind(note.id));
     for (const key of extractMediaKeys(sanitized)) {
       statements.push(
         db.prepare('INSERT OR IGNORE INTO note_media (note_id, media_key) VALUES (?, ?)').bind(note.id, key)
       );
     }
-  }
+  });
 
   for (const id of noteIdsToDelete) {
     statements.push(db.prepare('DELETE FROM notes WHERE id = ?').bind(id));
@@ -278,7 +330,14 @@ router.post('/push', authMiddleware, async (c) => {
     await db.batch(statements);
   }
 
-  // Folders are derived from notes, so ensure each touched folder exists.
+  const unresolved = confirmed.filter((c) => c.seq === null).map((c) => c.id);
+  if (unresolved.length) {
+    const seqMap = await getLatestSeqByNoteIds([...new Set(unresolved)]);
+    for (const c of confirmed) {
+      if (c.seq === null) c.seq = seqMap.get(c.id) || 0;
+    }
+  }
+
   const foldersTouched = new Map();
   for (const note of appliedNotes) {
     foldersTouched.set(`${note.category}\u0000${note.subcategory}`, note);
@@ -288,15 +347,16 @@ router.post('/push', authMiddleware, async (c) => {
   }
 
   return c.json({
-    applied: appliedNotes.length,
+    applied: appliedNotes.length - copyIds.size,
     deleted: noteIdsToDelete.length,
     conflicts,
+    notes: confirmed.map((c) => ({ id: c.id, seq: c.seq })),
+    deletedIds: noteIdsToDelete,
+    serverTime: new Date().toISOString(),
     latestSeq: await getLatestSeq()
   });
 });
 
-// Attachment manifest. Media bodies are served by the existing /img and /video
-// routes, so clients only need the key list to work out what they are missing.
 router.get('/media', authMiddleware, async (c) => {
   const { results } = await db.prepare(
     'SELECT DISTINCT media_key FROM note_media ORDER BY media_key'
@@ -308,3 +368,4 @@ router.get('/media', authMiddleware, async (c) => {
 });
 
 export default router;
+
