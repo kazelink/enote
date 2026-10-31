@@ -1,9 +1,10 @@
 import { API, Token } from './api.js';
 import * as LocalDB from './localdb.js';
-import { cacheNoteMedia } from './media.js';
+import { toRemoteNote } from '../shared/note-shape.js';
 
-const PULL_LIMIT = 50;
+const PULL_LIMIT = 100;
 const PUSH_BATCH = 40;
+const MAX_PUSH_ROUNDS = 200;
 const AUTO_SYNC_MS = 120_000;
 const MAX_PULL_PAGES = 200;
 
@@ -45,59 +46,81 @@ let backoffMs = 0;
 let backoffUntil = 0;
 
 const MIN_SYNC_GAP_MS = 3_000;
+const MAX_RETRY_DELAY_MS = 5 * 60_000;
 
 function isOffline() {
     return typeof navigator !== 'undefined' && navigator.onLine === false;
 }
 
+let retryTimer = null;
+
+function scheduleRetry(delayMs) {
+    if (retryTimer) return;
+    const wait = Math.max(250, Math.min(Number(delayMs) || 0, MAX_RETRY_DELAY_MS));
+    retryTimer = setTimeout(() => {
+        retryTimer = null;
+        syncNow();
+    }, wait);
+}
+
+function clearRetry() {
+    if (!retryTimer) return;
+    clearTimeout(retryTimer);
+    retryTimer = null;
+}
+
+function resetBackoff() {
+    backoffMs = 0;
+    backoffUntil = 0;
+}
+
 async function refreshPending() {
     try {
-        const stats = await LocalDB.localStats();
-        SyncStatus.update({ pending: stats.dirty + stats.tombstones });
+        SyncStatus.update({ pending: await LocalDB.pendingCount() });
     } catch {
     }
 }
 
 async function pushPending() {
-    const { notes, deletions } = await LocalDB.pendingChanges();
-    if (!notes.length && !deletions.length) return { conflicts: [], pushed: 0 };
-
     const conflicts = [];
     let pushed = 0;
 
-    for (let i = 0; i < notes.length; i += PUSH_BATCH) {
-        const batch = notes.slice(i, i + PUSH_BATCH);
-        const res = await API.req('sync/push', {
-            notes: batch.map(LocalDB.toRemoteNote)
-        }, 'POST');
+    for (let round = 0; round < MAX_PUSH_ROUNDS; round++) {
+        const { notes, deletions } = await LocalDB.pendingChanges(PUSH_BATCH);
+        if (!notes.length && !deletions.length) break;
 
-        for (const c of res.conflicts || []) conflicts.push(c);
+        if (notes.length) {
+            const res = await API.req('sync/push', {
+                notes: notes.map(toRemoteNote)
+            }, 'POST');
 
-        const seqById = new Map((res.notes || []).map((n) => [n.id, n.seq]));
-        const done = batch.filter((n) => seqById.has(n.id));
-        if (done.length) {
-            await LocalDB.markSynced(done, seqById);
-            pushed += done.length;
-        }
-    }
+            for (const c of res.conflicts || []) conflicts.push(c);
 
-    for (let i = 0; i < deletions.length; i += PUSH_BATCH) {
-        const batch = deletions.slice(i, i + PUSH_BATCH);
-        const res = await API.req('sync/push', {
-            deletions: batch.map((n) => ({ id: n.id, baseSeq: n._baseSeq || 0 }))
-        }, 'POST');
-
-        for (const c of res.conflicts || []) conflicts.push(c);
-
-        const deletedIds = res.deletedIds || [];
-        if (deletedIds.length) {
-            await LocalDB.markSynced([], null, deletedIds);
-            pushed += deletedIds.length;
+            const seqById = new Map((res.notes || []).map((n) => [n.id, n.seq]));
+            const done = notes.filter((n) => seqById.has(n.id));
+            if (done.length) {
+                await LocalDB.markNotesSynced(done, seqById);
+                pushed += done.length;
+            }
         }
 
-        for (const c of res.conflicts || []) {
-            if (c.kind === 'delete' && c.note) {
-                await LocalDB.restoreFromServer(c.note, c.serverSeq || 0);
+        if (deletions.length) {
+            const res = await API.req('sync/push', {
+                deletions: deletions.map((n) => ({ id: n.id, baseSeq: n._baseSeq || 0 }))
+            }, 'POST');
+
+            for (const c of res.conflicts || []) conflicts.push(c);
+
+            const deletedIds = res.deletedIds || [];
+            if (deletedIds.length) {
+                await LocalDB.markDeletedSynced(deletedIds);
+                pushed += deletedIds.length;
+            }
+
+            for (const c of res.conflicts || []) {
+                if (c.kind === 'delete' && c.note) {
+                    await LocalDB.restoreFromServer(c.note, c.serverSeq || 0);
+                }
             }
         }
     }
@@ -108,7 +131,6 @@ async function pushPending() {
 async function pullRemote() {
     let cursor = await LocalDB.getCursor();
     let pages = 0;
-    const pulled = [];
     let changed = 0;
 
     while (pages++ < MAX_PULL_PAGES) {
@@ -133,7 +155,6 @@ async function pullRemote() {
         const batchNotes = res.notes || [];
         const batchDeletes = (res.deleted || []).map((d) => d.id);
         if (batchNotes.length || batchDeletes.length) {
-            pulled.push(...batchNotes);
             changed += batchNotes.length + batchDeletes.length;
             await LocalDB.applyRemoteBatch(batchNotes, batchDeletes);
         }
@@ -151,10 +172,6 @@ async function pullRemote() {
     }
 
     await LocalDB.writeMeta('initialized', 1);
-
-    if (pulled.length) {
-        setTimeout(() => { cacheNoteMedia(pulled).catch(() => {}); }, 5_000);
-    }
 
     return { cursor, changed };
 }
@@ -175,8 +192,12 @@ export async function syncNow({ force = false } = {}) {
         return { noSession: true };
     }
 
-    if (!force && Date.now() < backoffUntil) return { backedOff: true };
+    if (!force && Date.now() < backoffUntil) {
+        scheduleRetry(backoffUntil - Date.now());
+        return { backedOff: true };
+    }
     if (!force && Date.now() - SyncStatus.lastSyncAt < MIN_SYNC_GAP_MS) {
+        scheduleRetry(MIN_SYNC_GAP_MS - (Date.now() - SyncStatus.lastSyncAt));
         return { throttled: true };
     }
 
@@ -185,6 +206,7 @@ export async function syncNow({ force = false } = {}) {
         return { offline: true };
     }
 
+    clearRetry();
     running = true;
     SyncStatus.update({ state: 'syncing', lastError: null });
 
@@ -192,8 +214,7 @@ export async function syncNow({ force = false } = {}) {
         const conflicts = await pushPending();
         const pullResult = await pullRemote();
 
-        backoffMs = 0;
-        backoffUntil = 0;
+        resetBackoff();
 
         SyncStatus.update({
             state: 'idle',
@@ -215,6 +236,7 @@ export async function syncNow({ force = false } = {}) {
         if (!authFailure) {
             backoffMs = Math.min(backoffMs ? backoffMs * 2 : 5_000, 5 * 60_000);
             backoffUntil = Date.now() + backoffMs;
+            if (!isOffline()) scheduleRetry(backoffMs);
         }
 
         SyncStatus.update({
@@ -241,14 +263,19 @@ export function startSyncEngine() {
     timer = setInterval(() => { syncNow(); }, AUTO_SYNC_MS);
 
     window.addEventListener('focus', () => { syncNow(); });
-    window.addEventListener('online', () => { syncNow(); });
+    window.addEventListener('online', () => {
+        resetBackoff();
+        clearRetry();
+        syncNow({ force: true });
+    });
     window.addEventListener('offline', () => SyncStatus.update({ state: 'offline' }));
 
     document.addEventListener('visibilitychange', () => {
         if (document.visibilityState === 'hidden') {
             if (SyncStatus.pending > 0) syncNow({ force: true });
         } else {
-            syncNow();
+            resetBackoff();
+            syncNow({ force: true });
         }
     });
 }

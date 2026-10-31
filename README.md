@@ -2,7 +2,7 @@
 
 A lightweight note-taking application containerized for easy deployment.
 
-👉 **[Try the Live Demo](https://op09090-enote-test.hf.space/app.html)**
+👉 **[Try the Live Demo](https://op09090-enote-test.hf.space/)**
 Password: LINUX
 
 ## Preview

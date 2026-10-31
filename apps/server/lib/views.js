@@ -1,10 +1,6 @@
 export {
-  escapeHtml,
-  renderArchiveDeleteAction,
-  renderArchiveRow,
-  renderArchiveList,
-  renderPagination,
   renderArchiveEmptyState,
-  renderArchivePayload
+  renderArchiveList,
+  renderPagination
 } from '../../client/shared/render.js';
 

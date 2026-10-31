@@ -18,12 +18,12 @@ import { rebuildNoteMediaIndex } from './scheduled.js';
 
 export const MAX_RESTORE_FILE = 100 * 1024 * 1024;
 export const MAX_RESTORE_REQUEST = 4 * 1024 * 1024;
-export const RESTORE_CHUNK_SIZE = 100;
-export const SANITIZE_BATCH_SIZE = 10;
+const RESTORE_CHUNK_SIZE = 100;
+const SANITIZE_BATCH_SIZE = 10;
 
 const jsonEncoder = new TextEncoder();
 
-export function extractRestoreEntries(payload) {
+function extractRestoreEntries(payload) {
   if (Array.isArray(payload)) return payload;
   if (payload && typeof payload === 'object') {
     for (const key of ['notes', 'diaries', 'entries', 'list']) {
@@ -33,7 +33,7 @@ export function extractRestoreEntries(payload) {
   return null;
 }
 
-export function extractRestoreFolders(payload) {
+function extractRestoreFolders(payload) {
   return payload && typeof payload === 'object' && Array.isArray(payload.folders) ? payload.folders : [];
 }
 
@@ -43,7 +43,7 @@ function normalizeEntryTimestamps(entry, fallback) {
   return { createdAt, updatedAt };
 }
 
-export function normalizeRestoreEntry(entry) {
+function normalizeRestoreEntry(entry) {
   if (!entry || typeof entry !== 'object' || !V.isUUID(entry.id)) return null;
 
   const rawContent = typeof entry.content === 'string' ? entry.content : '';
@@ -68,7 +68,7 @@ export function normalizeRestoreEntry(entry) {
   };
 }
 
-export function normalizeRestoreFolder(entry) {
+function normalizeRestoreFolder(entry) {
   if (!entry || typeof entry !== 'object') return null;
 
   const category = normalizeFolderName(entry.category);
@@ -115,8 +115,8 @@ function collectNormalizedRestoreEntries(entries) {
 async function sanitizeEntriesInPlace(entries) {
   for (let i = 0; i < entries.length; i += SANITIZE_BATCH_SIZE) {
     const batch = entries.slice(i, i + SANITIZE_BATCH_SIZE);
-    const sanitized = await Promise.all(batch.map((entry) => sanitizeContent(entry.content)));
-    batch.forEach((entry, index) => { entry.content = sanitized[index]; });
+    for (const entry of batch) entry.content = sanitizeContent(entry.content);
+    await new Promise((resolve) => setImmediate(resolve));
   }
 }
 
@@ -272,7 +272,7 @@ async function countRows(sql, params) {
   return Number((await db.prepare(sql).bind(...params).first())?.total ?? 0);
 }
 
-export async function* streamBackupJson({ exportedAt, scopeLabel, noteWhere, noteParams, folderWhere, folderParams, noteCount, folderCount }) {
+async function* streamBackupJson({ exportedAt, scopeLabel, noteWhere, noteParams, folderWhere, folderParams, noteCount, folderCount }) {
   const encode = (str) => jsonEncoder.encode(str);
 
   yield encode(`{"exportedAt":${JSON.stringify(exportedAt)},"scope":${JSON.stringify(scopeLabel)},"count":${noteCount},"folderCount":${folderCount},"folders":[`);

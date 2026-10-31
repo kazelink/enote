@@ -50,19 +50,13 @@ function handleMediaClick(target, container) {
     }
 }
 
-function appendCrumb(container, label, onClick, isPending = false) {
+function appendCrumb(container, label, onClick) {
     const crumb = document.createElement('span');
     crumb.className = 'breadcrumb-item';
     crumb.textContent = label;
     if (onClick) {
         crumb.classList.add('clickable');
         crumb.addEventListener('click', onClick);
-    }
-    if (isPending) {
-        crumb.classList.add('is-loading');
-        const spin = document.createElement('span');
-        spin.className = 'crumb-spin';
-        crumb.appendChild(spin);
     }
     container.appendChild(crumb);
 }
@@ -76,14 +70,14 @@ function appendDivider(container) {
 
 export const UI = {
     setStatus(mode) {
-        const statusEl = Utils.$('sync-stat');
+        const statusEl = Utils.$('op-status');
         if (!statusEl) return;
 
         statusEl.className = `sync-stat active ${mode === 'ok' ? 'success' : ''}`.trim();
         statusEl.innerHTML = STATUS_ICONS[mode] || '';
     },
 
-    renderBreadcrumb({ view, category, subcategory, q, tag, currentNote = null, notePathHint = null, onNavigate = null, pendingKey = null }) {
+    renderBreadcrumb({ view, category, subcategory, q, tag, currentNote = null, notePathHint = null, onNavigate = null }) {
         const titleEl = Utils.$('c-title-box');
         if (!titleEl) return;
         const navigate = onNavigate || (() => {});
@@ -109,7 +103,7 @@ export const UI = {
                 q: '',
                 tag: '',
                 page: 1
-            }), pendingKey === 'index');
+            }));
             return;
         }
 
@@ -129,7 +123,7 @@ export const UI = {
                     tag: '',
                     page: 1
                 })
-                : null, pendingKey === 'category');
+                : null);
         }
 
         if (noteSubcategory) {
@@ -144,7 +138,7 @@ export const UI = {
                     tag: '',
                     page: 1
                 })
-                : null, pendingKey === 'list');
+                : null);
         }
     },
 

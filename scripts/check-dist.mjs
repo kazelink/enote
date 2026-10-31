@@ -44,6 +44,11 @@ const stale = [];
 const missing = [];
 
 for (const rel of srcFiles) {
+  // index.html is rewritten in place by build-web.mjs (base href, relative
+  // asset paths), so it never matches the source byte-for-byte. Validated
+  // separately by the entry-html check below.
+  if (rel.replace(/\\/g, '/') === 'index.html') continue;
+
   const srcPath = path.join(srcDir, rel);
   const distPath = path.join(distDir, rel.replace(/\.mjs$/i, '.js'));
 
@@ -60,18 +65,18 @@ for (const rel of srcFiles) {
   }
 }
 
-const required = ['main.html', 'index.html', 'app.html'];
+const required = ['index.html'];
 for (const name of required) {
   if (!(await exists(path.join(distDir, name)))) missing.push(name);
 }
 
-const mainHtml = (await exists(path.join(distDir, 'main.html')))
-  ? await readFile(path.join(distDir, 'main.html'), 'utf8')
+const entryHtml = (await exists(path.join(distDir, 'index.html')))
+  ? await readFile(path.join(distDir, 'index.html'), 'utf8')
   : '';
-const mainOk = mainHtml.includes('<base href="./">') && !VERSION_QUERY.test(mainHtml);
+const entryOk = entryHtml.includes('<base href="./">') && !VERSION_QUERY.test(entryHtml);
 
-if (!mainOk && mainHtml) {
-  stale.push('main.html (missing <base href="./"> or still has ?v= queries)');
+if (!entryOk && entryHtml) {
+  stale.push('index.html (missing <base href="./"> or still has ?v= queries)');
 }
 
 if (!stale.length && !missing.length) {

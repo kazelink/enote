@@ -1,5 +1,9 @@
 export { escapeHtml } from '../../client/shared/render.js';
 
+import { normalizeInlineText, normalizeTagList, parseStoredTags, serializeTags } from '../../client/shared/tags.js';
+
+export { normalizeTagList, parseStoredTags, serializeTags };
+
 const ENTITY_MAP = {
     '&nbsp;': ' ',
     '&amp;': '&',
@@ -15,58 +19,12 @@ export function respondError(c, msg, status) {
     return c.json({ error: msg }, status);
 }
 
-function normalizeInlineText(value, maxLen) {
-    const text = String(value || '').replace(/\s+/g, ' ').trim();
-    if (!text) return '';
-    return text.slice(0, maxLen);
-}
-
 export function normalizeTitle(value, maxLen = 120) {
     return normalizeInlineText(value, maxLen);
 }
 
 export function normalizeFolderName(value, maxLen = 60) {
     return normalizeInlineText(value, maxLen);
-}
-
-export function normalizeTagList(input, { maxTags = 12, maxLen = 24 } = {}) {
-    const source = Array.isArray(input)
-        ? input
-        : String(input || '').split(/[,\n，]+/);
-
-    const tags = [];
-    const seen = new Set();
-
-    for (const raw of source) {
-        const normalized = normalizeInlineText(raw, maxLen);
-        if (!normalized) continue;
-
-        const key = normalized.toLowerCase();
-        if (seen.has(key)) continue;
-
-        seen.add(key);
-        tags.push(normalized);
-        if (tags.length >= maxTags) break;
-    }
-
-    return tags;
-}
-
-export function parseStoredTags(raw) {
-    if (Array.isArray(raw)) return normalizeTagList(raw);
-    if (typeof raw !== 'string' || !raw.trim()) return [];
-
-    try {
-        const parsed = JSON.parse(raw);
-        if (Array.isArray(parsed)) return normalizeTagList(parsed);
-    } catch {
-    }
-
-    return normalizeTagList(raw);
-}
-
-export function serializeTags(tags) {
-    return JSON.stringify(normalizeTagList(tags));
 }
 
 export function normalizeTimestamp(value, fallback = '') {

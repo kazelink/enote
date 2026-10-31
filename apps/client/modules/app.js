@@ -124,7 +124,7 @@ function buildLocationSearch() {
   STATE_KEYS.forEach(k => State[k] && p.set(k, State[k]));
   if (State.page > 1) p.set("page", String(State.page));
   const query = p.toString();
-  const path = location.pathname && location.pathname !== "/" ? location.pathname : "/main.html";
+  const path = location.pathname || "/";
   return query ? `${path}?${query}` : path;
 }
 
@@ -147,7 +147,7 @@ async function withLoading(fn, errorTitle = null, errorFallback = "Operation fai
 const COLLAPSE_STORAGE_KEY = "enote_collapsed_categories";
 
 const App = {
-  _views: {}, _popstateHandler: null, _restoreInFlight: false, _searchPanelOpen: false, _folderTreeCache: null, _tagCloudCache: null, _tagCloudExpanded: false, _tagCloudPanelCollapsed: true, _collapsedCategories: new Set(), _collapsedStateLoaded: false, _folderPanelCollapsed: false, _currentNote: null, _currentNoteFresh: false, _notePathHint: null, _treeContextState: { scope: "root", category: "" }, _lastFolderTreeHtml: null, _lastTagCloudHtml: null, _loadSeq: 0, _pendingTree: null, _pendingNav: null,
+  _views: {}, _popstateHandler: null, _restoreInFlight: false, _searchPanelOpen: false, _folderTreeCache: null, _tagCloudCache: null, _tagCloudExpanded: false, _tagCloudPanelCollapsed: true, _collapsedCategories: new Set(), _collapsedStateLoaded: false, _folderPanelCollapsed: false, _currentNote: null, _currentNoteFresh: false, _notePathHint: null, _treeContextState: { scope: "root", category: "" }, _lastFolderTreeHtml: null, _lastTagCloudHtml: null, _loadSeq: 0, _localRowsCache: null,
 
   _resetListContent() {
     ["home-entry-list", "category-entry-list", "entry-list"].forEach(id => {
@@ -282,7 +282,7 @@ const App = {
       Editor.bindSuggestion(Utils.$("backup-category"), "category");
       this._loadCollapsedState();['index', 'category', 'list', 'note', 'backup'].forEach(v => this._views[v] = Utils.$(`v-${v}`));
       window.App = this;
-      this._setupHtmxListeners();
+      this._setupDocumentListeners();
       this._setupTreeContextMenu();
       this._disableNativeContextMenu();
       UI.initGlobalEvents();
@@ -323,11 +323,9 @@ const App = {
 
   async loadView(options = {}) {
     const seq = ++this._loadSeq;
+    this._localRowsCache = null;
     if (!options.quiet && !options.pageTurn) this._resetListContent();
-    const inPlaceNav = !!(options.pageTurn || options.treeNav || options.navPending);
-    if (options.pageTurn) this._setPaginationBusy(options.dir);
-    if (options.treeNav) this._pendingTree = options.treeNav;
-    if (options.navPending) this._pendingNav = options.navPending;
+    if (options.pageTurn) this._setPaginationBusy();
     syncStateFromLocation();
     if (State.view !== "note") this._currentNote = this._notePathHint = null;
 
@@ -338,7 +336,6 @@ const App = {
     if (backBtn) {
       backBtn.classList.toggle("visible", State.view !== "index");
       backBtn.disabled = State.view === "index";
-      backBtn.classList.toggle("is-loading", this._pendingNav?.kind === "back");
     }
 
     const backupFab = Utils.$("btn-backup");
@@ -366,8 +363,6 @@ const App = {
     }
 
     if (State.view === "backup") {
-      this._clearTreePending(seq);
-      this._clearNavPending(seq);
       try {
         await this._loadFolderTree();
       } catch (e) {
@@ -375,7 +370,6 @@ const App = {
       }
       return;
     }
-    if (!options.quiet && !inPlaceNav) UI.setStatus("loading");
 
     try {
       await Promise.all([
@@ -395,16 +389,12 @@ const App = {
       } else if (State.view === "note") {
         await this._loadNote();
       }
-      UI.setStatus("");
-      this._clearTreePending(seq);
-      this._clearNavPending(seq);
     } catch (e) {
       this._clearPaginationBusy();
-      this._clearTreePending(seq);
-      this._clearNavPending(seq);
-      if (e?.code === "UNAUTHORIZED") { UI.setStatus(""); return; }
+      if (e?.code === "UNAUTHORIZED") return;
       console.error("View load failed:", e);
       UI.setStatus("err");
+      resetStatusLater("err");
     }
   },
 
@@ -438,7 +428,7 @@ const App = {
     const page = Number(params.page) || 1;
     const size = Number(params.size) || 10;
 
-    const rows = await LocalDB.allNotes();
+    const rows = await this._localRows();
     const filtered = LocalDB.queryNotes(rows, {
       category: params.category || "",
       subcategory: params.subcategory || "",
@@ -456,8 +446,18 @@ const App = {
     });
   },
 
+  _localRows() {
+    if (!this._localRowsCache) {
+      this._localRowsCache = LocalDB.allNotes().catch((e) => {
+        this._localRowsCache = null;
+        throw e;
+      });
+    }
+    return this._localRowsCache;
+  },
+
   async _localFolderTree() {
-    const rows = await LocalDB.allNotes();
+    const rows = await this._localRows();
     const cats = new Map();
 
     for (const n of rows) {
@@ -504,7 +504,7 @@ const App = {
   },
 
   async _localTags() {
-    const rows = await LocalDB.allNotes();
+    const rows = await this._localRows();
     const counts = new Map();
 
     for (const n of rows) {
@@ -566,12 +566,10 @@ const App = {
       }
     }
 
-    const pendTag = this._pendingNav?.kind === "tag" ? this._pendingNav.key : null;
     const chipsHtml = visibleRows.map(r => {
       const tag = String(r?.tag || "").trim();
       const enc = encodeInlineParam(tag);
-      const isPend = !!tag && tag === pendTag;
-      return tag ? `<button class="tag-cloud-chip${activeTag === tag ? " active" : ""}${isPend ? " is-loading" : ""}" type="button" onclick="App.openSidebarTagByEncoded('${enc}')" oncontextmenu="return App.openTreeContextMenu(event, 'tag', '', '', '${enc}')">${isPend ? '<span class="tag-chip-spin"></span>' : "#"}${escapeHtml(tag)}</button>` : "";
+      return tag ? `<button class="tag-cloud-chip${activeTag === tag ? " active" : ""}" type="button" onclick="App.openSidebarTagByEncoded('${enc}')" oncontextmenu="return App.openTreeContextMenu(event, 'tag', '', '', '${enc}')">#${escapeHtml(tag)}</button>` : "";
     }).join("");
 
     const footerMarkup = hasOverflow ? `<div class="tag-cloud-footer"><button class="tag-cloud-more${this._tagCloudExpanded ? " is-expanded" : ""}" type="button" aria-label="${this._tagCloudExpanded ? "Show fewer tags" : "Show more tags"}" onclick="App.toggleTagCloudExpanded()"><i class="ri-arrow-right-s-line"></i></button></div>` : "";
@@ -584,7 +582,7 @@ const App = {
     this._syncTagCloudPanelControls();
   },
 
-  _invalidateSidebarCaches() { this._folderTreeCache = this._tagCloudCache = null; this._tagCloudExpanded = false; this._lastFolderTreeHtml = this._lastTagCloudHtml = null; },
+  _invalidateSidebarCaches() { this._localRowsCache = null; this._folderTreeCache = this._tagCloudCache = null; this._tagCloudExpanded = false; this._lastFolderTreeHtml = this._lastTagCloudHtml = null; },
   toggleTagCloudExpanded() { if ((this._tagCloudCache || []).length > TAG_PREVIEW_LIMIT) { this._tagCloudExpanded = !this._tagCloudExpanded; this._renderTagCloud(); } },
   toggleTagCloudPanel() {
     this._tagCloudPanelCollapsed = !this._tagCloudPanelCollapsed;
@@ -646,23 +644,20 @@ const App = {
       const cat = String(r?.category || ""), encCat = encodeInlineParam(cat), subs = Array.isArray(r?.subfolders) ? r.subfolders : [];
       const isOpen = !this._collapsedCategories.has(cat);
       const isActCat = cat === aCat && !aSub, isActSub = cat === aCat && !!aSub;
-      const pend = this._pendingTree;
-      const isPendCat = !!pend && pend.category === cat && !pend.subcategory;
 
       return `
         <div class="tree-group ${isOpen ? "open" : ""}">
-          <div class="tree-node tree-category ${isActSub ? "active-parent" : isActCat ? "active" : ""}${isPendCat ? " is-loading" : ""}" onclick="App.openCategoryByEncoded('${encCat}')" oncontextmenu="return App.openTreeContextMenu(event, 'category', '${encCat}')">
+          <div class="tree-node tree-category ${isActSub ? "active-parent" : isActCat ? "active" : ""}" onclick="App.openCategoryByEncoded('${encCat}')" oncontextmenu="return App.openTreeContextMenu(event, 'category', '${encCat}')">
             <button class="tree-toggle" type="button" onclick="event.stopPropagation(); App.toggleCategoryFoldByEncoded('${encCat}')"><svg class="ri-icon" viewBox="0 0 24 24"><path d="M10 6l6 6-6 6"></path></svg></button>
-            <span class="tree-label">${escapeHtml(cat || "Imported")}</span>${this._treeCountCell(r?.count, isPendCat)}
+            <span class="tree-label">${escapeHtml(cat || "Imported")}</span><span class="tree-count">${Number(r?.count || 0)}</span>
             <span class="tree-delete-slot"><button class="tree-delete-btn" type="button" onclick="event.stopPropagation(); App.deleteCategoryByEncoded('${encCat}')"><i class="ri-close-line"></i></button></span>
           </div>
           <div class="tree-children">
             ${subs.length ? subs.map(s => {
         const sub = String(s?.subcategory || "General"), encSub = encodeInlineParam(sub);
-        const isPendSub = !!pend && pend.category === cat && pend.subcategory === sub;
         return `
-                <div class="tree-node tree-subcategory ${cat === aCat && sub === aSub ? "active" : ""}${isPendSub ? " is-loading" : ""}" onclick="App.openSubcategoryByEncoded('${encCat}', '${encSub}')" oncontextmenu="return App.openTreeContextMenu(event, 'subcategory', '${encCat}', '${encSub}')">
-                  <span class="tree-leaf"></span><span class="tree-label">${escapeHtml(sub)}</span>${this._treeCountCell(s?.count, isPendSub)}
+                <div class="tree-node tree-subcategory ${cat === aCat && sub === aSub ? "active" : ""}" onclick="App.openSubcategoryByEncoded('${encCat}', '${encSub}')" oncontextmenu="return App.openTreeContextMenu(event, 'subcategory', '${encCat}', '${encSub}')">
+                  <span class="tree-leaf"></span><span class="tree-label">${escapeHtml(sub)}</span><span class="tree-count">${Number(s?.count || 0)}</span>
                   <span class="tree-delete-slot"><button class="tree-delete-btn" type="button" onclick="event.stopPropagation(); App.deleteSubcategoryByEncoded('${encCat}', '${encSub}')"><i class="ri-close-line"></i></button></span>
                 </div>`;
       }).join("") : '<div class="tree-empty">No subfolders yet.</div>'}
@@ -674,27 +669,6 @@ const App = {
       target.innerHTML = html;
     }
     this._syncFolderPanelControls();
-  },
-
-  _treeCountCell(count, isPending) {
-    return isPending
-      ? '<span class="tree-count tree-count-loading"><span class="tree-spin"></span></span>'
-      : `<span class="tree-count">${Number(count || 0)}</span>`;
-  },
-
-  _clearTreePending(seq) {
-    if (!this._pendingTree || (seq !== undefined && seq !== this._loadSeq)) return;
-    this._pendingTree = null;
-    this._renderFolderTree();
-  },
-
-  _clearNavPending(seq) {
-    const pending = this._pendingNav;
-    if (!pending || (seq !== undefined && seq !== this._loadSeq)) return;
-    this._pendingNav = null;
-    if (pending.kind === "tag") { if (this._tagCloudCache) this._renderTagCloud(); }
-    else if (pending.kind === "crumb") UI.renderBreadcrumb(this._breadcrumbContext());
-    else if (pending.kind === "back") Utils.$("btn-header-back")?.classList.remove("is-loading");
   },
 
   primeSavedNote(note, fresh = false) {
@@ -714,8 +688,7 @@ const App = {
       tag: State.tag,
       currentNote: this._currentNote,
       notePathHint: this._notePathHint,
-      pendingKey: this._pendingNav?.kind === "crumb" ? this._pendingNav.key : null,
-      onNavigate: (next) => this.route(next, { navPending: { kind: "crumb", key: next.view } })
+      onNavigate: (next) => this.route(next)
     };
   },
 
@@ -815,11 +788,11 @@ const App = {
 
   openCategoryByEncoded(e) {
     const category = decodeURIComponent(e || "");
-    this.route({ view: "category", category, subcategory: "", note: "", q: "", tag: "", page: 1 }, { treeNav: { category, subcategory: "" } });
+    this.route({ view: "category", category, subcategory: "", note: "", q: "", tag: "", page: 1 });
   },
   openSubcategoryByEncoded(eC, eS) {
     const category = decodeURIComponent(eC || ""), subcategory = decodeURIComponent(eS || "");
-    this.route({ view: "list", category, subcategory, note: "", q: "", tag: "", page: 1 }, { treeNav: { category, subcategory } });
+    this.route({ view: "list", category, subcategory, note: "", q: "", tag: "", page: 1 });
   },
 
   toggleCategoryFoldByEncoded(e) {
@@ -897,12 +870,12 @@ const App = {
   toggleTagByEncoded(e) {
     const tag = decodeURIComponent(e || ""), next = State.tag === tag ? "" : tag;
     this._searchPanelOpen = false;
-    this.route({ note: "", tag: next, page: 1 }, { navPending: { kind: "tag", key: next } });
+    this.route({ note: "", tag: next, page: 1 });
   },
   openSidebarTagByEncoded(e) {
     const t = decodeURIComponent(e || ""), n = State.tag === t ? "" : t;
     this._searchPanelOpen = false;
-    this.route({ category: "", subcategory: "", note: "", q: "", tag: n, page: 1 }, { navPending: { kind: "tag", key: n } });
+    this.route({ category: "", subcategory: "", note: "", q: "", tag: n, page: 1 });
   },
   applySearch() {
     const q = String(Utils.$("note-search")?.value || "").trim();
@@ -932,7 +905,7 @@ const App = {
     else {
       txt.style.display = "inline"; inp.style.display = "none";
       const next = parseInt(inp.value, 10);
-      if (next && next !== State.page && next <= State.data.totalPg) this.route({ page: next }, { pageTurn: true, dir: next > State.page ? 1 : -1 });
+      if (next && next !== State.page && next <= State.data.totalPg) this.route({ page: next }, { pageTurn: true });
     }
   },
 
@@ -1012,35 +985,6 @@ const App = {
     location.reload();
   },
 
-  async openServerSettings() {
-    const entered = await swalPrompt(
-      "Server Address",
-      "e.g. http://192.168.1.20:3000",
-      "http://192.168.1.20:3000",
-      getApiBase()
-    );
-
-    if (entered == null) return;
-
-    const normalized = normalizeServerUrl(entered);
-    if (!normalized) {
-      await swalAlert("Invalid address", "Please enter an address like http://192.168.1.20:3000", "error");
-      return;
-    }
-
-    const probe = await this._probeServer(normalized);
-    if (!probe.ok) {
-      const keep = await swalConfirm(
-        "Cannot reach the server",
-        `${normalized}\n\n${probe.reason}\n\nSave this address anyway?`
-      );
-      if (!keep) return;
-    }
-
-    setApiBase(normalized);
-    location.reload();
-  },
-
   async _probeServer(base) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 6000);
@@ -1094,17 +1038,15 @@ const App = {
   changePage(dir) {
     const n = State.page + dir;
     if (n < 1 || n > State.data.totalPg) return;
-    this.route({ page: n }, { pageTurn: true, dir });
+    this.route({ page: n }, { pageTurn: true });
   },
 
   _activeViewEl() { return Object.values(this._views).find(v => v?.classList.contains("active")) || null; },
 
-  _setPaginationBusy(dir) {
+  _setPaginationBusy() {
     const pg = this._activeViewEl()?.querySelector("[data-pagination]");
     if (!pg) return;
     pg.classList.add("is-busy");
-    const btns = pg.querySelectorAll(".pg-btn");
-    (dir > 0 ? btns[1] : btns[0])?.classList.add("is-loading");
     const listEl = pg.parentElement;
     if (listEl) listEl.classList.add("is-updating");
   },
@@ -1115,14 +1057,12 @@ const App = {
     const pg = listEl.querySelector("[data-pagination]");
     if (!pg) return;
     pg.classList.remove("is-busy");
-    pg.querySelectorAll(".pg-btn.is-loading").forEach(btn => btn.classList.remove("is-loading"));
   },
 
   async goBack() {
-    const back = { navPending: { kind: "back" } };
-    if (State.view === "note") this.route({ note: "" }, back);
-    else if (State.view === "list" && State.category && State.subcategory) this.route({ subcategory: "", page: 1 }, back);
-    else this.route({ view: "index", category: "", subcategory: "", note: "", q: "", tag: "", page: 1 }, back);
+    if (State.view === "note") this.route({ note: "" });
+    else if (State.view === "list" && State.category && State.subcategory) this.route({ subcategory: "", page: 1 });
+    else this.route({ view: "index", category: "", subcategory: "", note: "", q: "", tag: "", page: 1 });
   },
   closeEditor: () => Editor.close(),
   pickRestoreFile() { const i = getRestoreInput(); if (i) { try { if (typeof i.showPicker === "function") i.showPicker(); else i.click(); } catch { i.click(); } } },
@@ -1158,26 +1098,7 @@ const App = {
     } catch (e) { if (e?.name !== "AbortError") { console.error("Download failed:", e); UI.setStatus("err"); } else UI.setStatus(""); }
   },
 
-  _setupHtmxListeners() {
-    document.addEventListener("htmx:configRequest", e => {
-      const nonce = Nonce.get();
-      if (nonce) e.detail.headers["X-Session-Nonce"] = nonce;
-
-      const base = getApiBase();
-      if (base && typeof e.detail.path === "string"
-        && e.detail.path.startsWith("/") && !e.detail.path.startsWith("//")) {
-        e.detail.path = base + e.detail.path;
-      }
-    });
-    document.addEventListener("htmx:beforeRequest", e => { if (e.target.id !== "auth-form") UI.setStatus("loading"); });
-
-    document.addEventListener("htmx:sendError", e => {
-      if (e.target?.id !== "auth-form") return;
-      const msg = Utils.$("auth-messages");
-      if (msg) {
-        msg.innerHTML = '<div class="auth-err">Cannot reach the server. Check your network, or open "Server" below to change the address.</div>';
-      }
-    });
+  _setupDocumentListeners() {
     document.addEventListener("change", async e => {
       const inp = e.target;
       if (inp?.id === "restore-input" && inp.files?.[0]) {

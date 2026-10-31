@@ -53,6 +53,19 @@ function validateUploadRequest(contentLength) {
   }
 }
 
+function assertMediaPayload(headerBytes, declaredType, totalBytes) {
+  if (!totalBytes) throw new Error('File required');
+  if (totalBytes > MAX_UPLOAD) {
+    throw Object.assign(new Error('File too large (max 100MB)'), { status: 413 });
+  }
+
+  const detectedType = detectMediaMime(headerBytes);
+  if (!detectedType || !ALLOWED_MIME.has(detectedType)) throw new Error('Invalid file');
+  if (detectedType !== declaredType) throw new Error('MIME type mismatch');
+
+  return detectedType;
+}
+
 function createUploadValidationStream(declaredType) {
   const headerChunks = [];
   let headerLength = 0;
@@ -76,23 +89,12 @@ function createUploadValidationStream(declaredType) {
       callback(null, chunk);
     },
     flush(callback) {
-      if (totalBytes === 0) {
-        callback(new Error('File required'));
-        return;
+      try {
+        assertMediaPayload(new Uint8Array(Buffer.concat(headerChunks)), declaredType, totalBytes);
+        callback();
+      } catch (error) {
+        callback(error);
       }
-
-      const headerBytes = new Uint8Array(Buffer.concat(headerChunks));
-      const detectedType = detectMediaMime(headerBytes);
-      if (!detectedType || !ALLOWED_MIME.has(detectedType)) {
-        callback(new Error('Invalid file'));
-        return;
-      }
-      if (detectedType !== declaredType) {
-        callback(new Error('MIME type mismatch'));
-        return;
-      }
-
-      callback();
     }
   });
 }
@@ -102,15 +104,9 @@ async function validateMultipartFile(file) {
 
   const declaredType = normalizeMime(file.type);
   if (!ALLOWED_MIME.has(declaredType)) throw new Error('Unsupported file type');
-  if (file.size > MAX_UPLOAD) throw Object.assign(new Error('File too large (max 100MB)'), { status: 413 });
 
   const headerBytes = new Uint8Array(await file.slice(0, 32).arrayBuffer());
-  const detectedType = detectMediaMime(headerBytes);
-
-  if (!detectedType || !ALLOWED_MIME.has(detectedType)) throw new Error('Invalid file');
-  if (detectedType !== declaredType) throw new Error('MIME type mismatch');
-
-  return detectedType;
+  return assertMediaPayload(headerBytes, declaredType, file.size);
 }
 
 function mediaResponse(c, filename, mime) {

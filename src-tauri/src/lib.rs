@@ -27,7 +27,7 @@ pub fn run() {
     #[cfg(desktop)]
     {
         builder = builder.setup(|app| {
-            WebviewWindowBuilder::new(app, "main", WebviewUrl::App("main.html".into()))
+            WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
                 .title("eNote")
                 .inner_size(1280.0, 860.0)
                 .min_inner_size(380.0, 480.0)

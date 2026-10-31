@@ -19,39 +19,43 @@ async function maybeYield(iterationCount) {
     }
 }
 
+const INSERT_MEDIA_SQL = 'INSERT OR IGNORE INTO note_media (note_id, media_key) VALUES (?, ?)';
+const SCAN_BATCH = 250;
+
 export async function rebuildNoteMediaIndex() {
     await db.prepare('DELETE FROM note_media').run();
 
-    const insertMediaKey = db.db.prepare('INSERT OR IGNORE INTO note_media (note_id, media_key) VALUES (?, ?)');
-    const flushPendingKeys = db.db.transaction((records) => {
-        for (const record of records) {
-            insertMediaKey.run(record.note_id, record.media_key);
-        }
-    });
-
-    const pendingRecords = [];
-    const BATCH_SIZE = 250;
     let noteCount = 0;
+    let lastId = '';
+    let pending = [];
 
-    for (const row of db.prepare('SELECT id, content FROM notes').iterate()) {
-        noteCount += 1;
+    const flush = async () => {
+        if (!pending.length) return;
+        await db.batch(pending.map((r) => db.prepare(INSERT_MEDIA_SQL).bind(r.note_id, r.media_key)));
+        pending = [];
+    };
 
-        const mediaKeys = extractMediaKeys(row?.content);
-        for (const mediaKey of mediaKeys) {
-            pendingRecords.push({ note_id: row.id, media_key: mediaKey });
-            if (pendingRecords.length >= BATCH_SIZE) {
-                flushPendingKeys(pendingRecords);
-                pendingRecords.length = 0;
+    for (;;) {
+        const { results } = await db.prepare(
+            'SELECT id, content FROM notes WHERE id > ? ORDER BY id LIMIT ?'
+        ).bind(lastId, SCAN_BATCH).all();
+
+        if (!results.length) break;
+
+        for (const row of results) {
+            noteCount += 1;
+            lastId = row.id;
+
+            for (const mediaKey of extractMediaKeys(row?.content)) {
+                pending.push({ note_id: row.id, media_key: mediaKey });
+                if (pending.length >= SCAN_BATCH) await flush();
             }
         }
 
         await maybeYield(noteCount);
     }
 
-    if (pendingRecords.length > 0) {
-        flushPendingKeys(pendingRecords);
-    }
-
+    await flush();
     return noteCount;
 }
 
@@ -76,7 +80,9 @@ async function cleanupOrphanedMediaFast() {
     let scanned = 0;
     let deleted = 0;
 
-    const checkKeyStmt = db.db.prepare('SELECT 1 FROM note_media WHERE media_key = ? LIMIT 1');
+    const isReferenced = async (key) => Boolean(await db.prepare(
+        'SELECT 1 AS x FROM note_media WHERE media_key = ? LIMIT 1'
+    ).bind(key).first());
 
     for await (const obj of bucket.iterate()) {
         scanned += 1;
@@ -87,7 +93,7 @@ async function cleanupOrphanedMediaFast() {
             continue;
         }
 
-        const isUsed = !!checkKeyStmt.get(key);
+        const isUsed = await isReferenced(key);
         if (!isUsed) {
             try {
                 await bucket.delete(key);

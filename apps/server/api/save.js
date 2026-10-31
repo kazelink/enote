@@ -3,9 +3,9 @@ import { authMiddleware } from '../lib/auth.js';
 import { ensureFolderRecords } from '../lib/folders.js';
 import { jsonError, parseJsonBody } from '../lib/http.js';
 import { sanitizeContent } from '../lib/sanitize.js';
-import { cleanupImages, cleanupMediaKeys, extractMediaKeys, normalizeFolderName, normalizeTagList, normalizeTitle, serializeTags } from '../lib/utils.js';
+import { cleanupImages, cleanupMediaKeys, normalizeFolderName, normalizeTagList, normalizeTitle, serializeTags } from '../lib/utils.js';
 import { V } from '../lib/validate.js';
-import { UPSERT_NOTE_SQL } from '../lib/sql.js';
+import { noteWriteStatements } from '../lib/note-write.js';
 import { db, bucket, runBackground } from '../lib/core.js';
 
 const router = new Hono();
@@ -40,15 +40,6 @@ async function promotePlannedTempMedia(bucket, finalKeys) {
   }
 }
 
-function noteMediaStatements(id, content) {
-  return [
-    db.prepare('DELETE FROM note_media WHERE note_id = ?').bind(id),
-    ...extractMediaKeys(content).map((key) =>
-      db.prepare('INSERT OR IGNORE INTO note_media (note_id, media_key) VALUES (?, ?)').bind(id, key)
-    )
-  ];
-}
-
 async function restorePreviousNoteState(previousNote, id) {
   if (!previousNote) {
     await db.batch([
@@ -58,20 +49,16 @@ async function restorePreviousNoteState(previousNote, id) {
     return;
   }
 
-  await db.batch([
-    db.prepare(UPSERT_NOTE_SQL)
-      .bind(
-        previousNote.id,
-        previousNote.title,
-        previousNote.category,
-        previousNote.subcategory,
-        previousNote.tags,
-        previousNote.content,
-        previousNote.created_at,
-        previousNote.updated_at
-      ),
-    ...noteMediaStatements(id, previousNote.content)
-  ]);
+  await db.batch(noteWriteStatements({
+    id: previousNote.id,
+    title: previousNote.title,
+    category: previousNote.category,
+    subcategory: previousNote.subcategory,
+    tagsJson: previousNote.tags,
+    content: previousNote.content,
+    createdAt: previousNote.created_at,
+    updatedAt: previousNote.updated_at
+  }));
 }
 
 function parseAndValidateRequest(body) {
@@ -125,7 +112,7 @@ router.post('/', authMiddleware, async (c) => {
       rawContent
     } = parseAndValidateRequest(body);
 
-    const sanitizedInput = await sanitizeContent(rawContent);
+    const sanitizedInput = sanitizeContent(rawContent);
     const promotionPlan = planTempMediaPromotion(sanitizedInput);
     const sanitizedContent = promotionPlan.content;
     const previousNote = body?.id
@@ -141,11 +128,16 @@ router.post('/', authMiddleware, async (c) => {
 
     await ensureFolderRecords(db, category, subcategory, createdAt, updatedAt);
 
-    await db.batch([
-      db.prepare(UPSERT_NOTE_SQL)
-        .bind(id, title, category, subcategory, serializeTags(tags), sanitizedContent, createdAt, updatedAt),
-      ...noteMediaStatements(id, sanitizedContent)
-    ]);
+    await db.batch(noteWriteStatements({
+      id,
+      title,
+      category,
+      subcategory,
+      tagsJson: serializeTags(tags),
+      content: sanitizedContent,
+      createdAt,
+      updatedAt
+    }));
 
     try {
       await promotePlannedTempMedia(bucket, promotionPlan.finalKeys);

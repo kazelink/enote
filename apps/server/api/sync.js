@@ -3,9 +3,8 @@ import { authMiddleware } from '../lib/auth.js';
 import { ensureFolderRecords } from '../lib/folders.js';
 import { jsonError, parseJsonBody } from '../lib/http.js';
 import { sanitizeContent } from '../lib/sanitize.js';
-import { UPSERT_NOTE_SQL } from '../lib/sql.js';
+import { noteMediaStatements, upsertNoteStatement } from '../lib/note-write.js';
 import {
-  extractMediaKeys,
   normalizeFolderName,
   normalizeTagList,
   normalizeTitle,
@@ -14,6 +13,7 @@ import {
 } from '../lib/utils.js';
 import { V } from '../lib/validate.js';
 import { db } from '../lib/core.js';
+import { toClientNote } from '../../client/shared/note-shape.js';
 import {
   getLatestSeq,
   getLatestSeqByNoteIds,
@@ -29,20 +29,6 @@ const MAX_CONTENT_LENGTH = 500_000;
 const MAX_ITEMS_PER_PUSH = 200;
 const MAX_PULL_LIMIT = 200;
 const DEFAULT_PULL_LIMIT = 50;
-
-function toClientNote(row, seq) {
-  return {
-    id: row.id,
-    title: row.title,
-    category: row.category,
-    subcategory: row.subcategory,
-    tags: parseStoredTags(row.tags),
-    content: typeof row.content === 'string' ? row.content : '',
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
-    seq
-  };
-}
 
 router.get('/state', authMiddleware, async (c) => {
   const latestSeq = await getLatestSeq();
@@ -121,7 +107,7 @@ router.get('/pull', authMiddleware, async (c) => {
 
   const nextSeq = changes[changes.length - 1].seq;
   const remaining = await db.prepare(
-    'SELECT 1 AS x FROM sync_changes WHERE seq > ? LIMIT 1'
+    "SELECT 1 AS x FROM sync_changes WHERE entity = 'note' AND seq > ? LIMIT 1"
   ).bind(nextSeq).first();
 
   return c.json({
@@ -224,9 +210,7 @@ router.post('/push', authMiddleware, async (c) => {  const { value: body, respon
 
   const allIds = [...new Set([...parsedNotes.map((n) => n.id), ...deletionIds.map((d) => d.id)])];
   const latestByNote = await getLatestSeqByNoteIds(allIds);
-  const sanitizedNotes = await Promise.all(
-    parsedNotes.map(async (note) => ({ ...note, content: await sanitizeContent(note.content) }))
-  );
+  const sanitizedNotes = parsedNotes.map((note) => ({ ...note, content: sanitizeContent(note.content) }));
 
   const conflicts = [];
   const appliedNotes = [];
@@ -294,31 +278,20 @@ router.post('/push', authMiddleware, async (c) => {  const { value: body, respon
   }
 
   const statements = [];
-  const sanitizedContents = await Promise.all(appliedNotes.map((note) => sanitizeContent(note.content)));
 
-  appliedNotes.forEach((note, index) => {
-    const sanitized = sanitizedContents[index];
-    const tagsJson = serializeTags(note.tags);
+  appliedNotes.forEach((note) => {
+    statements.push(upsertNoteStatement({
+      id: note.id,
+      title: note.title,
+      category: note.category,
+      subcategory: note.subcategory,
+      tagsJson: serializeTags(note.tags),
+      content: note.content,
+      createdAt: note.createdAt,
+      updatedAt: note.updatedAt
+    }));
 
-    statements.push(
-      db.prepare(UPSERT_NOTE_SQL).bind(
-        note.id,
-        note.title,
-        note.category,
-        note.subcategory,
-        tagsJson,
-        sanitized,
-        note.createdAt,
-        note.updatedAt
-      )
-    );
-
-    statements.push(db.prepare('DELETE FROM note_media WHERE note_id = ?').bind(note.id));
-    for (const key of extractMediaKeys(sanitized)) {
-      statements.push(
-        db.prepare('INSERT OR IGNORE INTO note_media (note_id, media_key) VALUES (?, ?)').bind(note.id, key)
-      );
-    }
+    statements.push(...noteMediaStatements(note.id, note.content));
   });
 
   for (const id of noteIdsToDelete) {

@@ -13,7 +13,7 @@ class LocalDatabase {
         }
         this.db = new Database(dbPath);
         this.db.pragma('journal_mode = WAL');
-        this.db.pragma('synchronous = NORMAL');
+        this.db.pragma('synchronous = FULL');
         this.db.pragma('foreign_keys = ON');
         this._stmtCache = new Map();
     }

@@ -44,8 +44,9 @@ async function startup() {
         maxAge: 300
     }));
 
-    const IMMUTABLE_RE = /\.(woff2?|ttf|eot|svg|png|jpe?g|gif|webp|ico|css)$/i;
+    const IMMUTABLE_RE = /\.(woff2?|ttf|eot|svg|png|jpe?g|gif|webp|ico)$/i;
     const JS_MODULE_RE = /\.(js|mjs)$/i;
+    const CSS_RE = /\.css$/i;
 
     mainApp.use('/*', async (c, next) => {
         await next();
@@ -53,7 +54,7 @@ async function startup() {
         if (IMMUTABLE_RE.test(p) || p.startsWith('/assets/')) {
             c.header('Cache-Control', 'public, max-age=31536000, immutable');
         }
-        else if (JS_MODULE_RE.test(p)) {
+        else if (JS_MODULE_RE.test(p) || CSS_RE.test(p)) {
             c.header('Cache-Control', 'no-cache');
         }
         else if (p.endsWith('.html') || p === '/') {
@@ -71,7 +72,7 @@ async function startup() {
     const clientRoot = existsSync('./client') ? './client' : './apps/client';
 
     if (serveWeb) {
-        mainApp.use('/*', serveStatic({ root: clientRoot, index: 'app.html', precompressed: true }));
+        mainApp.use('/*', serveStatic({ root: clientRoot, index: 'index.html', precompressed: true }));
     } else {
         mainApp.get('/', (c) => c.text(
             'eNote API server\n\n'

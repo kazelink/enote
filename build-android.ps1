@@ -131,7 +131,7 @@ Push-Location 'src-tauri'
 # --features tauri/custom-protocol is mandatory: tauri's build.rs computes
 # `dev = !custom_protocol`, and a "dev" build makes the asset protocol proxy every
 # request to the dev server instead of serving the embedded files, which surfaces
-# at runtime as "Failed to request http://tauri.localhost/main.html".
+# at runtime as "Failed to request http://tauri.localhost/index.html".
 & "$env:USERPROFILE\.cargo\bin\cargo.exe" build --release --target "$target-linux-android" --lib --features tauri/custom-protocol
 $cargoExit = $LASTEXITCODE
 Pop-Location

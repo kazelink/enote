@@ -1,26 +1,12 @@
 import { Hono } from 'hono';
 import { authMiddleware } from '../lib/auth.js';
-import { parseStoredTags } from '../lib/utils.js';
 import { getQueryString, jsonError } from '../lib/http.js';
 import { renderArchiveEmptyState, renderArchiveList, renderPagination } from '../lib/views.js';
 import { V } from '../lib/validate.js';
 import { db } from '../lib/core.js';
+import { toClientNote } from '../../client/shared/note-shape.js';
 
 const router = new Hono();
-
-function toClientNote(row) {
-  if (!row) return null;
-  return {
-    id: row.id,
-    title: row.title,
-    category: row.category,
-    subcategory: row.subcategory,
-    tags: parseStoredTags(row.tags),
-    content: typeof row.content === 'string' ? row.content : '',
-    createdAt: row.created_at,
-    updatedAt: row.updated_at
-  };
-}
 
 function buildFtsQuery(value) {
   return String(value || '')
@@ -120,7 +106,7 @@ router.get('/', authMiddleware, async (c) => {
      ORDER BY n.title COLLATE NOCASE ASC, n.updated_at DESC, n.created_at DESC
      LIMIT ? OFFSET ?`
   ).bind(...params, limit, (safePage - 1) * limit).all();
-  const list = (listRes.results ?? []).map(toClientNote);
+  const list = (listRes.results ?? []).map((row) => toClientNote(row));
 
   if (c.req.header('HX-Request')) {
     const hasAnyFilter = !!String(q || '').trim() || !!String(tag || '').trim();

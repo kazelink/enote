@@ -223,6 +223,11 @@ body.ready {
     backdrop-filter: blur(10px);
     -webkit-backdrop-filter: blur(10px);
 }
+/* 侧栏卡片竖直排列、间隙只有 16px，20px/45px 的投影会铺满整个间隙，
+   在浅色渐变背景上形成一条把两块卡片连起来的深色带。收紧到刚好不越界。 */
+.workspace-side > .workspace-panel {
+    box-shadow: 0 2px 8px rgba(148, 163, 184, 0.05);
+}
 .sidebar-panel {
     display: flex;
     flex-direction: column;
@@ -319,21 +324,6 @@ body.ready {
 }
 .breadcrumb-item.clickable:hover {
     color: var(--m-blu);
-}
-.breadcrumb-item.is-loading {
-    color: var(--m-blu);
-    pointer-events: none;
-}
-.crumb-spin {
-    display: inline-block;
-    width: 10px;
-    height: 10px;
-    margin-left: 6px;
-    vertical-align: -1px;
-    border-radius: 50%;
-    border: 2px solid rgba(var(--m-blu-rgb), 0.25);
-    border-top-color: var(--m-blu);
-    animation: spin 0.7s linear infinite;
 }
 .breadcrumb-divider {
     color: var(--txt-mut);
@@ -554,21 +544,6 @@ body.ready {
 }
 .btn-back-head .ri-icon {
     stroke-width: 0;
-}
-#btn-header-back.is-loading {
-    pointer-events: none;
-}
-#btn-header-back.is-loading svg {
-    display: none;
-}
-#btn-header-back.is-loading::after {
-    content: "";
-    width: 13px;
-    height: 13px;
-    border-radius: 50%;
-    border: 2px solid rgba(var(--m-blu-rgb), 0.25);
-    border-top-color: var(--m-blu);
-    animation: spin 0.7s linear infinite;
 }
 input[type=number]::-webkit-inner-spin-button,
 input[type=number]::-webkit-outer-spin-button {
@@ -880,22 +855,6 @@ input[type=number] {
 }
 .tree-category.active-parent .tree-count {
     color: var(--text-soft);
-}
-.tree-node.is-loading .tree-label {
-    color: var(--m-blu);
-}
-.tree-count-loading {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-}
-.tree-spin {
-    width: 11px;
-    height: 11px;
-    border-radius: 50%;
-    border: 2px solid rgba(var(--m-blu-rgb), 0.22);
-    border-top-color: var(--m-blu);
-    animation: spin 0.7s linear infinite;
 }
 .tree-toggle {
     width: 24px;
@@ -1815,22 +1774,6 @@ input[type=number] {
     border-color: rgba(var(--m-blu-rgb), 0.22);
     color: var(--m-blu);
 }
-.tag-cloud-chip.is-loading {
-    pointer-events: none;
-    background: rgba(var(--m-blu-rgb), 0.08);
-    border-color: rgba(var(--m-blu-rgb), 0.16);
-    color: var(--m-blu);
-}
-.tag-chip-spin {
-    flex-shrink: 0;
-    width: 9px;
-    height: 9px;
-    margin-right: 3px;
-    border-radius: 50%;
-    border: 2px solid rgba(var(--m-blu-rgb), 0.25);
-    border-top-color: var(--m-blu);
-    animation: spin 0.7s linear infinite;
-}
 .notes-home-state {
     min-height: 380px;
     display: flex;
@@ -2204,30 +2147,12 @@ input[type=number] {
     opacity: 0.3;
     pointer-events: none;
 }
-.pg-spin {
-    display: none;
-    width: 13px;
-    height: 13px;
-    border-radius: 50%;
-    border: 2px solid rgba(var(--m-blu-rgb), 0.22);
-    border-top-color: var(--m-blu);
-    animation: spin 0.7s linear infinite;
-}
-.pg-btn.is-loading .pg-spin {
-    display: block;
-}
-.pg-btn.is-loading i {
-    display: none;
-}
 .pg-box.is-busy .pg-btn,
 .pg-box.is-busy .pg-status {
     pointer-events: none;
 }
 .pg-box.is-busy .pg-btn {
     opacity: 0.35;
-}
-.pg-box.is-busy .pg-btn.is-loading {
-    opacity: 1;
 }
 .pg-box.is-busy .pg-status {
     opacity: 0.7;
@@ -2358,11 +2283,6 @@ input[type=number] {
     width: 24px;
     height: 24px;
     fill: currentColor;
-}
-.htmx-request .auth-btn svg,
-.auth-btn.loading svg,
-.spin {
-    animation: spin 0.8s linear infinite;
 }
 #auth-messages {
     min-height: 30px;

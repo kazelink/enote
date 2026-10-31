@@ -28,7 +28,6 @@
     <link rel="modulepreload" href="/modules/editor-table.js?v=5.5">
     <link rel="modulepreload" href="/modules/editor-toolbar.js?v=5.6">
     <link rel="modulepreload" href="/assets/squire.mjs">
-    <script src="/assets/htmx.js" defer></script>
     <script src="/assets/sweetalert2.all.min.js" defer></script>
 </head>
 
@@ -37,7 +36,7 @@
     <div id="auth-overlay">
         <div class="auth-card">
             <div class="c-title">ENTER PASSWORD</div>
-            <form id="auth-form" hx-post="/api/login" hx-target="#auth-messages" hx-swap="innerHTML">
+            <form id="auth-form">
                 <input type="password" name="password" id="auth-input" required placeholder="" autofocus>
                 <button type="submit" class="auth-btn">
                     <svg viewBox="0 0 24 24">
@@ -301,6 +300,7 @@
                             <span class="c-title" id="c-title-box">NOTES</span>
                         </div>
                         <div class="head-right">
+                            <div id="op-status" class="sync-stat" aria-live="polite"></div>
                             <div id="sync-stat" class="sync-stat"></div>
                             <button class="panel-tool-btn" id="btn-print-mode" type="button"
                                 data-state="expanded" onclick="App.togglePrintMode()" aria-label="Toggle print mode">

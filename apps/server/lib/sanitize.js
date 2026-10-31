@@ -67,7 +67,7 @@ const SANITIZE_OPTIONS = {
   disallowedTagsMode: 'discard'
 };
 
-export async function sanitizeContent(html) {
+export function sanitizeContent(html) {
   if (typeof html !== 'string') return '';
 
   return sanitizeHtml(html, SANITIZE_OPTIONS);

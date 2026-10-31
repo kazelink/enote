@@ -25,9 +25,15 @@ app.onError((error, c) => {
     return c.text('Internal Server Error', 500);
 });
 
-app.get('/', (c) => c.redirect('/app.html'));
-app.get('/index.html', (c) => c.redirect('/app.html'));
-app.get('/backup', (c) => c.redirect('/app.html?view=backup'));
+app.get('/app.html', (c) => {
+  const search = new URL(c.req.url).search;
+  return c.redirect(`/index.html${search}`);
+});
+app.get('/main.html', (c) => {
+  const search = new URL(c.req.url).search;
+  return c.redirect(`/index.html${search}`);
+});
+app.get('/backup', (c) => c.redirect('/index.html?view=backup'));
 
 app.route('/img', createImagesRouter('img'));
 app.route('/video', createImagesRouter('video'));

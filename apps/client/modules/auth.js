@@ -1,6 +1,8 @@
-import { Utils, RI_SVGS } from './dom.js';
+import { Utils, RI_SVGS, escapeHtml } from './dom.js';
 import { UI } from './ui.js';
-import { Nonce, Token } from './api.js';
+import { API, Nonce, Token } from './api.js';
+
+const NETWORK_ERROR = 'Cannot reach the server. Check your network, or open "Server" below to change the address.';
 
 export const Auth = {
     init() {
@@ -8,41 +10,52 @@ export const Auth = {
         if (!form) return;
 
         const btn = form.querySelector('.auth-btn');
-        let origHtml = '';
+        let busy = false;
 
         inp?.addEventListener('input', () => { if (msg) msg.innerHTML = ''; });
 
-        form.addEventListener('htmx:beforeRequest', () => {
-            if (btn) { origHtml = btn.innerHTML; btn.innerHTML = RI_SVGS.loader; }
+        form.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            if (busy) return;
+
+            const password = String(inp?.value || '');
+            if (!password.trim()) return;
+
+            busy = true;
+            const origHtml = btn ? btn.innerHTML : '';
+            if (btn) btn.innerHTML = RI_SVGS.loader;
             if (msg) msg.innerHTML = '';
-        });
 
-        msg?.addEventListener('htmx:beforeSwap', e => {
-            if (e.detail.xhr.status >= 400) Object.assign(e.detail, { shouldSwap: true, isError: false });
-        });
+            try {
+                const res = await API.req('login', { password }, 'POST');
 
-        form.addEventListener('htmx:afterRequest', e => {
-            if (e.detail.failed || e.detail.xhr.status >= 400) {
+                if (res?.nonce) Nonce.set(res.nonce);
+                if (res?.token) Token.set(res.token);
+
+                if (btn) {
+                    btn.innerHTML = '<i class="ri-check-line" style="font-size:24px"></i>';
+                    btn.style.background = 'var(--success)';
+                }
+                if (msg) msg.innerHTML = '';
+                UI.hideAuth();
+
+                window.App?._startLocalSync?.();
+
+                if (Utils.$('editor-wrapper-dom')?.style.display === 'none') await window.App?.loadView();
+            } catch (err) {
+                const message = err?.code === 'UNAUTHORIZED' || err?.status
+                    ? (err.message || 'ERROR')
+                    : NETWORK_ERROR;
+
                 if (btn && origHtml) btn.innerHTML = origHtml;
-                if (inp) { inp.value = ''; requestAnimationFrame(() => inp.focus({ preventScroll: true })); }
-                if (msg && !msg.innerHTML.trim()) msg.innerHTML = e.detail.xhr.responseText || '<div class="auth-err">ERROR</div>';
+                if (inp) {
+                    inp.value = '';
+                    requestAnimationFrame(() => inp.focus({ preventScroll: true }));
+                }
+                if (msg) msg.innerHTML = `<div class="auth-err">${escapeHtml(message)}</div>`;
+            } finally {
+                busy = false;
             }
-        });
-
-        document.body.addEventListener('loginSuccess', async () => {
-            const okEl = Utils.$('auth-messages')?.querySelector('.auth-ok');
-            if (okEl?.dataset?.nonce) Nonce.set(okEl.dataset.nonce);
-            if (okEl?.dataset?.token) Token.set(okEl.dataset.token);
-            if (btn) {
-                btn.innerHTML = '<i class="ri-check-line" style="font-size:24px"></i>';
-                btn.style.background = 'var(--success)';
-            }
-            if (msg) msg.innerHTML = '';
-            UI.hideAuth();
-
-            window.App?._startLocalSync?.();
-
-            if (Utils.$('editor-wrapper-dom')?.style.display === 'none') await window.App?.loadView();
         });
     }
 };

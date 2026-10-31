@@ -17,7 +17,7 @@ function encodeInlineParam(value) {
     return encodeURIComponent(String(value || '')).replace(/'/g, '%27');
 }
 
-export function renderArchiveDeleteAction(noteId) {
+function renderArchiveDeleteAction(noteId) {
     return `
       <span class="archive-actions">
         <button class="archive-delete-btn" type="button" aria-label="Delete note"
@@ -28,7 +28,7 @@ export function renderArchiveDeleteAction(noteId) {
   `;
 }
 
-export function renderArchiveRow(note) {
+function renderArchiveRow(note) {
     const safeId = escapeHtml(note.id);
     const safeTitle = escapeHtml(note.title || 'Untitled Note');
     const encodedCategory = encodeInlineParam(note.category);
@@ -67,7 +67,7 @@ export function renderPagination(currPg, totalPg) {
     const nextCls = safeCurr >= safeTotal ? ' is-disabled' : '';
     return `
     <div class="pg-box" data-pagination style="display:${pgStyle}">
-      <span class="pg-btn${prevCls}" onclick="App.changePage(-1)"><i class="ri-arrow-left-s-line"></i><span class="pg-spin"></span></span>
+      <span class="pg-btn${prevCls}" onclick="App.changePage(-1)"><i class="ri-arrow-left-s-line"></i></span>
       <div class="pg-status">
         <span class="pg-status-txt" onclick="App.toggleJump(true)">${safeCurr}</span>
         <input type="number" class="pg-inp" style="display:none"
@@ -76,7 +76,7 @@ export function renderPagination(currPg, totalPg) {
           onkeydown="if(event.key==='Enter')this.blur()">
         <span>/ <span class="pg-total">${safeTotal}</span></span>
       </div>
-      <span class="pg-btn${nextCls}" onclick="App.changePage(1)"><i class="ri-arrow-right-s-line"></i><span class="pg-spin"></span></span>
+      <span class="pg-btn${nextCls}" onclick="App.changePage(1)"><i class="ri-arrow-right-s-line"></i></span>
       <div class="pg-data" data-total="${safeTotal}" data-page="${safeCurr}" style="display:none"></div>
     </div>
   `;

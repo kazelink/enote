@@ -103,7 +103,7 @@ const ERROR_REPORTER = `<script>
 })();
 </script>`;
 
-let html = await readFile(path.join(distDir, 'app.html'), 'utf8');
+let html = await readFile(path.join(distDir, 'index.html'), 'utf8');
 
 html = html.replace(VERSION_QUERY, '');
 html = html.replace(/\.mjs(?=["'])/g, '.js');
@@ -116,9 +116,8 @@ html = html.replace(
     `<head$1>\n    <base href="./">\n    ${ERROR_REPORTER}`
 );
 
-await writeFile(path.join(distDir, 'main.html'), html, 'utf8');
-// Tauri resolves a reload of "/" to index.html; without this alias F5 on the
-// root URL fails with "asset not found: index.html".
+// index.html is the single entry point for both the browser and the Tauri
+// shell (whose window url is "index.html"), so it is rewritten in place.
 await writeFile(path.join(distDir, 'index.html'), html, 'utf8');
 
 console.log(

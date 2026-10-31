@@ -1,3 +1,5 @@
+import { toLocalNote } from '../shared/note-shape.js';
+
 const DB_NAME = 'enote';
 const DB_VERSION = 1;
 
@@ -95,36 +97,6 @@ export async function setCursor(seq) {
     return writeMeta('lastSeq', Number(seq) || 0);
 }
 
-export function toLocalNote(note, { dirty = 1, baseSeq = 0, deleted = 0 } = {}) {
-    return {
-        id: note.id,
-        title: note.title || '',
-        category: note.category || '',
-        subcategory: note.subcategory || '',
-        tags: Array.isArray(note.tags) ? note.tags : [],
-        content: typeof note.content === 'string' ? note.content : '',
-        createdAt: note.createdAt || new Date().toISOString(),
-        updatedAt: note.updatedAt || new Date().toISOString(),
-        _dirty: dirty ? 1 : 0,
-        _baseSeq: Number(baseSeq) || 0,
-        _deleted: deleted ? 1 : 0
-    };
-}
-
-export function toRemoteNote(note) {
-    return {
-        id: note.id,
-        title: note.title,
-        category: note.category,
-        subcategory: note.subcategory,
-        tags: note.tags,
-        content: note.content,
-        createdAt: note.createdAt,
-        updatedAt: note.updatedAt,
-        baseSeq: note._baseSeq || 0
-    };
-}
-
 export async function putNote(note, options) {
     const record = note._dirty !== undefined ? note : toLocalNote(note, options);
     return withStore(STORE_NOTES, 'readwrite', (store) => store.put(record));
@@ -154,24 +126,28 @@ export async function restoreFromServer(note, seq) {
     );
 }
 
-export async function pendingChanges() {
-    const rows = (await withRead(STORE_NOTES, (store) => store.index('_dirty').getAll(1))) || [];
+export async function pendingChanges(limit = 0) {
+    const rows = (await withRead(STORE_NOTES, (store) => limit > 0
+        ? store.index('_dirty').getAll(1, limit)
+        : store.index('_dirty').getAll(1))) || [];
     return {
         notes: rows.filter((r) => !r._deleted),
         deletions: rows.filter((r) => r._deleted)
     };
 }
 
-export async function markSynced(notes, seqById, deletedIds = []) {
+export async function markNotesSynced(notes, seqById) {
     return withStore(STORE_NOTES, 'readwrite', (store) => {
         for (const note of notes) {
             const seq = seqById instanceof Map ? seqById.get(note.id) : seqById?.[note.id];
             store.put({ ...note, _dirty: 0, _baseSeq: Number(seq) || note._baseSeq || 0 });
         }
+    });
+}
 
-        for (const id of deletedIds) {
-            store.delete(id);
-        }
+export async function markDeletedSynced(ids) {
+    return withStore(STORE_NOTES, 'readwrite', (store) => {
+        for (const id of ids) store.delete(id);
     });
 }
 
@@ -281,21 +257,6 @@ export async function replaceFolders(folders) {
     });
 }
 
-export async function deriveFoldersFromNotes() {
-    const rows = await allNotes();
-    const seen = new Map();
-
-    for (const n of rows) {
-        if (n._deleted || !n.category) continue;
-        const key = `${n.category}\u0000${n.subcategory || ''}`;
-        if (!seen.has(key)) {
-            seen.set(key, { key, category: n.category, subcategory: n.subcategory || '' });
-        }
-    }
-
-    return [...seen.values()];
-}
-
 export async function putMediaBlob(key, blob) {
     return withStore(STORE_MEDIA, 'readwrite', (store) =>
         store.put({ key, blob, size: blob.size || 0, accessedAt: Date.now() })
@@ -334,29 +295,6 @@ export async function mediaTotalBytes() {
     });
 }
 
-export async function localStats() {
-    const db = await openDB();
-
-    return new Promise((resolve, reject) => {
-        const tx = db.transaction(STORE_NOTES, 'readonly');
-        let total = 0;
-        let dirty = 0;
-        let tombstones = 0;
-        const req = tx.objectStore(STORE_NOTES).openCursor();
-
-        req.onsuccess = () => {
-            const cursor = req.result;
-            if (!cursor) return;
-            const row = cursor.value;
-            if (row._deleted) tombstones += 1;
-            else {
-                total += 1;
-                if (row._dirty) dirty += 1;
-            }
-            cursor.continue();
-        };
-
-        tx.oncomplete = () => resolve({ total, dirty, tombstones });
-        tx.onerror = () => reject(tx.error);
-    });
+export async function pendingCount() {
+    return Number(await withRead(STORE_NOTES, (store) => store.index('_dirty').count(1))) || 0;
 }
