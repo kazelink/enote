@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import { authMiddleware } from '../lib/auth.js';
 import { escapeHtml } from '../lib/utils.js';
 import { getContentLength, getQueryString, jsonError, parseJsonBody } from '../lib/http.js';
+import { beginMaintenance, endMaintenance, maintenanceTask } from '../lib/maintenance.js';
 import {
   MAX_RESTORE_FILE,
   MAX_RESTORE_REQUEST,
@@ -43,33 +44,44 @@ router.get('/export', authMiddleware, async (c) => {
 });
 
 router.post('/restore', authMiddleware, async (c) => {
-  if (String(c.req.header(STREAM_RESTORE_HEADER) || '').toLowerCase() === STREAM_RESTORE_MODE) {
+  // 恢复期间独占写通道：其余写请求直接收到 503，而不是撞锁超时
+  // 或者把数据混进恢复事务里一起回滚。
+  if (maintenanceTask()) {
+    return jsonError(c, `Server busy: ${maintenanceTask()} in progress, retry shortly.`, 503);
+  }
+  beginMaintenance('backup restore');
+
+  try {
+    if (String(c.req.header(STREAM_RESTORE_HEADER) || '').toLowerCase() === STREAM_RESTORE_MODE) {
+      try {
+        const declaredBytes = getDeclaredBackupSize(c, getContentLength(c));
+        const result = await restoreBackupStream(c.req.raw.body, declaredBytes);
+        return c.json(result);
+      } catch (error) {
+        return restoreErrorResponse(c, error);
+      }
+    }
+
+    const contentLength = getContentLength(c);
+    if (contentLength != null && contentLength > MAX_RESTORE_REQUEST) {
+      return jsonError(c, 'Restore payload too large. Please retry from the app.', 413);
+    }
+
     try {
-      const declaredBytes = getDeclaredBackupSize(c, getContentLength(c));
-      const result = await restoreBackupStream(c.req.raw.body, declaredBytes);
-      return c.json(result);
+      const { value: parsed, response } = await parseJsonBody(c, 'Invalid JSON');
+      if (response) return response;
+
+      const totalBytes = Number(parsed?.totalBytes);
+      if (Number.isFinite(totalBytes) && totalBytes > MAX_RESTORE_FILE) {
+        return jsonError(c, 'Backup file too large (max 100MB)', 413);
+      }
+
+      return c.json(await restoreBackupPayload(parsed));
     } catch (error) {
       return restoreErrorResponse(c, error);
     }
-  }
-
-  const contentLength = getContentLength(c);
-  if (contentLength != null && contentLength > MAX_RESTORE_REQUEST) {
-    return jsonError(c, 'Restore payload too large. Please retry from the app.', 413);
-  }
-
-  try {
-    const { value: parsed, response } = await parseJsonBody(c, 'Invalid JSON');
-    if (response) return response;
-
-    const totalBytes = Number(parsed?.totalBytes);
-    if (Number.isFinite(totalBytes) && totalBytes > MAX_RESTORE_FILE) {
-      return jsonError(c, 'Backup file too large (max 100MB)', 413);
-    }
-
-    return c.json(await restoreBackupPayload(parsed));
-  } catch (error) {
-    return restoreErrorResponse(c, error);
+  } finally {
+    endMaintenance();
   }
 });
 

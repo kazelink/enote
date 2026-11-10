@@ -15,6 +15,10 @@ export const SyncStatus = {
     pending: 0,
     didWork: false,
     conflicts: [],
+    // 本轮被服务端拒绝的条目
+    rejected: [],
+    // 仍处于隔离状态（等待用户修改后重试）的笔记 id
+    rejectedIds: [],
     _listeners: new Set(),
 
     on(fn) {
@@ -32,7 +36,6 @@ export const SyncStatus = {
 
 let running = false;
 let rerunRequested = false;
-let timer = null;
 let started = false;
 
 let clockOffsetMs = 0;
@@ -76,18 +79,27 @@ function resetBackoff() {
 
 async function refreshPending() {
     try {
-        SyncStatus.update({ pending: await LocalDB.pendingCount() });
+        const [pending, rejectedIds] = await Promise.all([
+            LocalDB.pendingCount(),
+            LocalDB.rejectedIds()
+        ]);
+        SyncStatus.update({ pending, rejectedIds });
     } catch {
     }
 }
 
 async function pushPending() {
     const conflicts = [];
+    const rejected = [];
     let pushed = 0;
 
     for (let round = 0; round < MAX_PUSH_ROUNDS; round++) {
         const { notes, deletions } = await LocalDB.pendingChanges(PUSH_BATCH);
         if (!notes.length && !deletions.length) break;
+
+        // 这一轮推进了多少条（成功 + 被拒）。被拒的会被隔离出队列，
+        // 所以算推进；如果一整轮什么都没推进，就是卡住了，再循环也没用。
+        const progressedBefore = pushed + rejected.length;
 
         if (notes.length) {
             const res = await API.req('sync/push', {
@@ -95,6 +107,16 @@ async function pushPending() {
             }, 'POST');
 
             for (const c of res.conflicts || []) conflicts.push(c);
+
+            // 服务端逐条拒绝的笔记（正文超长、字段非法等）：标记后不再重推，
+            // 否则下一轮 pendingChanges 又会取到它们，在批次里反复空转。
+            if (res.rejected?.length) {
+                const snapshot = new Map(notes.map((n) => [n.id, n]));
+                await LocalDB.markNotesRejected(
+                    res.rejected.map((item) => ({ ...(snapshot.get(item.id) || { id: item.id }), reason: item.reason }))
+                );
+                rejected.push(...res.rejected);
+            }
 
             const seqById = new Map((res.notes || []).map((n) => [n.id, n.seq]));
             const done = notes.filter((n) => seqById.has(n.id));
@@ -106,7 +128,7 @@ async function pushPending() {
 
         if (deletions.length) {
             const res = await API.req('sync/push', {
-                deletions: deletions.map((n) => ({ id: n.id, baseSeq: n._baseSeq || 0 }))
+                deletions: deletions.map((item) => ({ id: item.id, baseSeq: item.baseSeq || 0 }))
             }, 'POST');
 
             for (const c of res.conflicts || []) conflicts.push(c);
@@ -117,15 +139,34 @@ async function pushPending() {
                 pushed += deletedIds.length;
             }
 
+            // id 非法等被服务端拒绝的删除项：留在队列里只会每轮重推。
+            const rejectedDeletions = (res.rejected || []).map((item) => item.id).filter(Boolean);
+            if (rejectedDeletions.length) {
+                await LocalDB.clearDeletions(rejectedDeletions);
+                rejected.push(...res.rejected);
+            }
+
             for (const c of res.conflicts || []) {
-                if (c.kind === 'delete' && c.note) {
+                if (c.kind !== 'delete') continue;
+
+                if (c.note) {
+                    // 服务端有更新的版本，把笔记还回来，同时撤销本地删除意图，
+                    // 否则下一轮拉取会因为它还在队列里而被跳过。
                     await LocalDB.restoreFromServer(c.note, c.serverSeq || 0);
+                    await LocalDB.clearDeletions([c.note.id]);
+                } else {
+                    // 服务端已经没有这篇笔记：删除目标已达成，清队列即可。
+                    // 新版服务端不会再这样返回，这里兜住旧版服务端。
+                    await LocalDB.clearDeletions([c.id]);
                 }
             }
         }
+
+        // 一整轮没有任何推进：剩下的都是推不动的，直接停，避免空转。
+        if (pushed + rejected.length === progressedBefore) break;
     }
 
-    return { conflicts, pushed };
+    return { conflicts, rejected, pushed };
 }
 
 async function pullRemote() {
@@ -157,9 +198,6 @@ async function pullRemote() {
         if (batchNotes.length || batchDeletes.length) {
             changed += batchNotes.length + batchDeletes.length;
             await LocalDB.applyRemoteBatch(batchNotes, batchDeletes);
-        }
-        if (res.folders) {
-            await LocalDB.replaceFolders(res.folders);
         }
 
         const nextCursor = Number(res.nextSeq) || cursor;
@@ -211,7 +249,7 @@ export async function syncNow({ force = false } = {}) {
     SyncStatus.update({ state: 'syncing', lastError: null });
 
     try {
-        const conflicts = await pushPending();
+        const pushed = await pushPending();
         const pullResult = await pullRemote();
 
         resetBackoff();
@@ -220,8 +258,9 @@ export async function syncNow({ force = false } = {}) {
             state: 'idle',
             lastSyncAt: Date.now(),
             lastError: null,
-            didWork: conflicts.pushed > 0 || (pullResult?.changed || 0) > 0,
-            conflicts: conflicts.conflicts
+            didWork: pushed.pushed > 0 || (pullResult?.changed || 0) > 0,
+            conflicts: pushed.conflicts,
+            rejected: pushed.rejected
         });
 
         if (pullResult?.changed > 0) {
@@ -229,7 +268,7 @@ export async function syncNow({ force = false } = {}) {
         }
 
         await refreshPending();
-        return { ok: true, conflicts: conflicts.conflicts };
+        return { ok: true, conflicts: pushed.conflicts, rejected: pushed.rejected };
     } catch (error) {
         const authFailure = error?.code === 'UNAUTHORIZED';
 
@@ -260,7 +299,8 @@ export function startSyncEngine() {
 
     setTimeout(() => { syncNow(); }, 300);
 
-    timer = setInterval(() => { syncNow(); }, AUTO_SYNC_MS);
+    // 句柄不保存：引擎只启动一次（started 守卫），且没有停止入口。
+    setInterval(() => { syncNow(); }, AUTO_SYNC_MS);
 
     window.addEventListener('focus', () => { syncNow(); });
     window.addEventListener('online', () => {
@@ -288,17 +328,27 @@ export async function queueNoteSave(note) {
 }
 
 export async function queueNoteDelete(id) {
-    await LocalDB.tombstoneNote(id);
+    await LocalDB.deleteNoteLocal(id);
     await refreshPending();
-    scheduleSoon();
+    // 删除意图明确、数据量小，不必等满 1.2 秒的保存防抖窗口。
+    scheduleSoon(300);
 }
 
 let soonTimer = null;
-function scheduleSoon() {
-    if (soonTimer) return;
+let soonDueAt = 0;
+
+// 多次调用只保留最早的那个到期时间：删除（300ms）可以提前保存（1200ms）的排期，
+// 反之不会把已排好的任务往后推。
+function scheduleSoon(delay = 1200) {
+    const due = Date.now() + delay;
+    if (soonTimer && soonDueAt <= due) return;
+
+    if (soonTimer) clearTimeout(soonTimer);
+    soonDueAt = due;
     soonTimer = setTimeout(() => {
         soonTimer = null;
+        soonDueAt = 0;
         syncNow();
-    }, 1200);
+    }, delay);
 }
 

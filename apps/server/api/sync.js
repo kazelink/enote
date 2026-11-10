@@ -55,7 +55,15 @@ router.get('/pull', authMiddleware, async (c) => {
 
   if (since > 0) {
     const minSeq = await getMinSeq();
-    if (!minSeq || since < minSeq - 1) {
+
+    // 两种游标失效的情况：
+    // 1) since > latestSeq —— 服务端换库 / 恢复旧备份后序号变小，增量永远是空，
+    //    客户端会一直卡在旧游标上同步不到任何东西；
+    // 2) since < minSeq - 1 —— 客户端游标早于保留窗口。
+    // 两种都必须全量重来。
+    const cursorUnusable = since > latestSeq || !minSeq || since < minSeq - 1;
+
+    if (cursorUnusable) {
       return c.json({
         notes: [],
         deleted: [],
@@ -191,17 +199,26 @@ router.post('/push', authMiddleware, async (c) => {  const { value: body, respon
     return jsonError(c, `Too many items in one push (max ${MAX_ITEMS_PER_PUSH})`, 413);
   }
 
-  let parsedNotes;
-  try {
-    parsedNotes = incomingNotes.map(normalizeIncomingNote);
-  } catch (e) {
-    return jsonError(c, e.message, e.status || 400);
+  // 逐条校验：一条超长/字段缺失的笔记只拒绝它自己，不拖垮整批。
+  // 整批拒绝会让客户端永远卡在同一条毒丸上（每轮都失败、退避、重试）。
+  const parsedNotes = [];
+  const rejected = [];
+
+  for (const raw of incomingNotes) {
+    try {
+      parsedNotes.push(normalizeIncomingNote(raw));
+    } catch (e) {
+      rejected.push({ id: String(raw?.id || ''), reason: e.message, status: e.status || 400 });
+    }
   }
 
   const deletionIds = [];
   for (const item of incomingDeletions) {
     const id = String(item?.id || '');
-    if (!V.isUUID(id)) return jsonError(c, 'Invalid note ID format', 400);
+    if (!V.isUUID(id)) {
+      rejected.push({ id, reason: 'Invalid note ID format', status: 400 });
+      continue;
+    }
     deletionIds.push({
       id,
       baseSeq: Number.isFinite(Number(item?.baseSeq)) ? Math.max(0, Math.floor(Number(item.baseSeq))) : 0
@@ -209,6 +226,21 @@ router.post('/push', authMiddleware, async (c) => {  const { value: body, respon
   }
 
   const allIds = [...new Set([...parsedNotes.map((n) => n.id), ...deletionIds.map((d) => d.id)])];
+
+  // 全部被拒时不能继续：下面按 id 数量拼 IN 列表，空数组会生成非法 SQL。
+  if (!allIds.length) {
+    return c.json({
+      applied: 0,
+      deleted: 0,
+      conflicts: [],
+      rejected,
+      notes: [],
+      deletedIds: [],
+      serverTime: new Date().toISOString(),
+      latestSeq: await getLatestSeq()
+    });
+  }
+
   const latestByNote = await getLatestSeqByNoteIds(allIds);
   const sanitizedNotes = parsedNotes.map((note) => ({ ...note, content: sanitizeContent(note.content) }));
 
@@ -258,22 +290,42 @@ router.post('/push', authMiddleware, async (c) => {  const { value: body, respon
     confirmed.push({ id: note.id, seq: null });
   }
 
+  // 服务端是否还有这篇笔记，一次查完（避免逐条 SELECT）。
+  const existingById = new Map();
+  if (deletionIds.length) {
+    const placeholders = deletionIds.map(() => '?').join(',');
+    const found = await db.prepare(`SELECT * FROM notes WHERE id IN (${placeholders})`)
+      .bind(...deletionIds.map((d) => d.id))
+      .all();
+    for (const row of found.results || []) existingById.set(row.id, row);
+  }
+
   const noteIdsToDelete = [];
+  // 服务端已经不存在：删除目标已达成。不能返回冲突——否则客户端既没有
+  // 可恢复的版本，也不会清队列，那条删除任务会永远留在本地反复重推。
+  const alreadyGone = [];
+
   for (const item of deletionIds) {
+    const existing = existingById.get(item.id);
+
+    if (!existing) {
+      alreadyGone.push(item.id);
+      continue;
+    }
+
     const serverSeq = latestByNote.get(item.id) || 0;
     if (serverSeq > item.baseSeq) {
-      const existing = await db.prepare('SELECT * FROM notes WHERE id = ?').bind(item.id).first();
-
       conflicts.push({
         id: item.id,
         kind: 'delete',
         baseSeq: item.baseSeq,
         serverSeq,
         resolution: 'server_wins',
-        note: existing ? toClientNote(existing, serverSeq) : null
+        note: toClientNote(existing, serverSeq)
       });
       continue;
     }
+
     noteIdsToDelete.push(item.id);
   }
 
@@ -321,10 +373,11 @@ router.post('/push', authMiddleware, async (c) => {  const { value: body, respon
 
   return c.json({
     applied: appliedNotes.length - copyIds.size,
-    deleted: noteIdsToDelete.length,
+    deleted: noteIdsToDelete.length + alreadyGone.length,
     conflicts,
+    rejected,
     notes: confirmed.map((c) => ({ id: c.id, seq: c.seq })),
-    deletedIds: noteIdsToDelete,
+    deletedIds: [...noteIdsToDelete, ...alreadyGone],
     serverTime: new Date().toISOString(),
     latestSeq: await getLatestSeq()
   });

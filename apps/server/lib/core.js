@@ -5,6 +5,10 @@ import path from 'path';
 import { Readable } from 'stream';
 import { pipeline } from 'stream/promises';
 
+// 语句缓存上限。正常查询是固定模板，只有动态 IN 列表会按数量分叉，
+// 200 条足以覆盖全部固定查询 + 若干批量大小。
+const MAX_CACHED_STATEMENTS = 200;
+
 class LocalDatabase {
     constructor(dbPath) {
         const dir = path.dirname(dbPath);
@@ -19,11 +23,18 @@ class LocalDatabase {
     }
 
     _cachedPrepare(query) {
-        let stmt = this._stmtCache.get(query);
-        if (!stmt) {
-            stmt = this.db.prepare(query);
-            this._stmtCache.set(query, stmt);
+        const cached = this._stmtCache.get(query);
+        if (cached) return cached;
+
+        // 动态拼接的 IN (?, ?, ...) 会按占位符数量生成不同 SQL，
+        // 不设上限的话缓存会随不同批量大小无限增长。
+        if (this._stmtCache.size >= MAX_CACHED_STATEMENTS) {
+            const oldest = this._stmtCache.keys().next().value;
+            if (oldest !== undefined) this._stmtCache.delete(oldest);
         }
+
+        const stmt = this.db.prepare(query);
+        this._stmtCache.set(query, stmt);
         return stmt;
     }
 
@@ -33,12 +44,20 @@ class LocalDatabase {
 
     async batch(statements) {
         const results = [];
-        const runBatch = this.db.transaction(() => {
+        const runAll = () => {
             for (const stmt of statements) {
                 results.push(stmt.runSync());
             }
-        });
-        runBatch();
+        };
+
+        // 已经在事务里（例如备份恢复的 BEGIN IMMEDIATE 期间）：直接执行，
+        // 否则 better-sqlite3 会抛 "cannot start a transaction within a transaction"。
+        if (this.db.inTransaction) {
+            runAll();
+            return results;
+        }
+
+        this.db.transaction(runAll)();
         return results;
     }
 

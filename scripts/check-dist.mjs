@@ -6,7 +6,7 @@ const root = path.resolve(import.meta.dirname, '..');
 const srcDir = path.join(root, 'apps', 'client');
 const distDir = path.join(root, 'dist');
 
-const VERSION_QUERY = /\?v=[\w.\-]+(?=['"`])/g;
+const VERSION_QUERY = /\?v=[\w.-]+(?=['"`])/g;
 
 function normalize(text) {
   return text.replace(VERSION_QUERY, '').replace(/\.mjs(?=['"])/g, '.js');

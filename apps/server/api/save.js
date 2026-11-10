@@ -124,7 +124,10 @@ router.post('/', authMiddleware, async (c) => {
     const createdAt = typeof previousNote?.created_at === 'string' && previousNote.created_at
       ? previousNote.created_at
       : now;
-    const updatedAt = `${date}T00:00:00.000Z`;
+    // 客户端只在用户主动改了归档日期时传历史日期；传今天（或没传）说明是
+    // 正常编辑，用精确时间，避免同一天的笔记全部带上 00:00:00 而无法按时分秒排序。
+    const today = new Date().toISOString().slice(0, 10);
+    const updatedAt = date === today ? now : `${date}T00:00:00.000Z`;
 
     await ensureFolderRecords(db, category, subcategory, createdAt, updatedAt);
 

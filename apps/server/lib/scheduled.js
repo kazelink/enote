@@ -2,6 +2,7 @@ import { setImmediate as waitImmediate } from 'timers/promises';
 import { extractMediaKeys } from './utils.js';
 import { db, bucket } from './core.js';
 import { pruneSyncChanges } from './sync.js';
+import { maintenanceTask } from './maintenance.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const LOOP_YIELD_EVERY = 200;
@@ -80,6 +81,15 @@ async function cleanupOrphanedMediaFast() {
     let scanned = 0;
     let deleted = 0;
 
+    // rebuildNoteMediaIndex 是「先 DELETE 再分批重建」，中途崩溃会留下空索引。
+    // 这种情况下按「没人引用」判定会把所有媒体文件删光，所以先做个自检。
+    const indexed = Number((await db.prepare('SELECT COUNT(*) AS n FROM note_media').first())?.n) || 0;
+    const totalNotes = Number((await db.prepare('SELECT COUNT(*) AS n FROM notes').first())?.n) || 0;
+    if (totalNotes > 0 && indexed === 0) {
+        console.warn('Media GC: note_media looks empty while notes exist, skipping orphan cleanup.');
+        return { scanned: 0, deleted: 0, skipped: true };
+    }
+
     const isReferenced = async (key) => Boolean(await db.prepare(
         'SELECT 1 AS x FROM note_media WHERE media_key = ? LIMIT 1'
     ).bind(key).first());
@@ -109,6 +119,12 @@ async function cleanupOrphanedMediaFast() {
 }
 
 export async function scheduledGc() {
+    // 备份恢复会重建 note_media、独占写通道，GC 这时候不该插进来。
+    if (maintenanceTask()) {
+        console.log('Media GC: skipped (maintenance in progress).');
+        return;
+    }
+
     try {
         console.log('Media GC: rebuilding note_media index...');
         const noteCount = await rebuildNoteMediaIndex();

@@ -4,12 +4,17 @@ import { swalAlert, swalUnsaved } from './swal.js';
 import { Upload } from './upload.js';
 import * as LocalDB from './localdb.js';
 import { queueNoteSave, syncNow, SyncStatus, serverNowIso } from './sync.js';
+import { absolutizeMediaHtml, relativizeMediaHtml } from './media.js';
 import { sanitizePastedHtml } from './paste.js?v=5.5';
 import Squire from '../assets/squire.mjs';
 import { IndentPlugin } from './editor-indent.js?v=5.4';
 import { ImagePlugin } from './editor-image.js';
 import { ColorPlugin } from './editor-color.js';
 import { TablePlugin } from './editor-table.js?v=5.5';
+
+// 与服务端 MAX_CONTENT_LENGTH 一致。超限的笔记服务端会逐条拒绝，
+// 与其等一次往返，不如保存前就告诉用户。
+const MAX_CONTENT_LENGTH = 500_000;
 import { ToolbarPlugin } from './editor-toolbar.js?v=5.6';
 
 const toggleDisplay = Utils.toggleView;
@@ -115,11 +120,13 @@ export const Editor = {
 
     _getEditorHTML() {
         const html = this.sq ? this.sq.getHTML() : (this.el.dText?.innerHTML || '');
-        return isEmptyEditorHtml(html) ? '' : html;
+        // 编辑器里显示的是「绝对地址 + 令牌」，入库前必须剥回去，
+        // 否则令牌会写进正文并同步到别的设备。
+        return isEmptyEditorHtml(html) ? '' : relativizeMediaHtml(html);
     },
 
     _setEditorHTML(html) {
-        const safeHtml = sanitizePastedHtml(String(html || ''));
+        const safeHtml = absolutizeMediaHtml(sanitizePastedHtml(String(html || '')));
         if (this.sq) {
             if (!/<\s*video\b/i.test(safeHtml)) {
                 this.sq.setHTML(safeHtml);
@@ -170,6 +177,16 @@ export const Editor = {
             return false;
         }
 
+        const content = this._getEditorHTML();
+        if (content.length > MAX_CONTENT_LENGTH) {
+            swalAlert(
+                'Content Too Long',
+                `This note is ${Math.round(content.length / 1000)} KB, over the ${Math.round(MAX_CONTENT_LENGTH / 1000)} KB per-note limit. Split it into several notes before saving.`,
+                'warning'
+            );
+            return false;
+        }
+
         if (el.dSave) {
             el.dSave.classList.add('sending');
             el.dSave.disabled = true;
@@ -190,10 +207,8 @@ export const Editor = {
                 subcategory: String(el.nSubcategory.value || '').trim(),
                 tags: normalizeTagInput(el.nTags?.value),
                 createdAt: existing?.createdAt || serverNowIso(),
-                updatedAt: el.nDate.value
-                    ? `${el.nDate.value}T00:00:00.000Z`
-                    : serverNowIso(),
-                content: this._getEditorHTML()
+                updatedAt: this._resolveUpdatedAt(el.nDate.value),
+                content
             };
 
             await queueNoteSave({ ...savedNote, _baseSeq: existing?._baseSeq || 0 });
@@ -205,6 +220,7 @@ export const Editor = {
             if (el.nTags) el.nTags.value = savedNote.tags.join(', ');
 
             this._updateMetaStatus(savedNote.updatedAt);
+            this._openedDate = String(savedNote.updatedAt || '').slice(0, 10);
             window.App?._invalidateSidebarCaches?.();
             window.App?.primeSavedNote?.(savedNote, true);
             State.originalSnapshot = this.snapshot();
@@ -556,6 +572,16 @@ export const Editor = {
         if (e.key === 'Escape') return e.preventDefault(), this._hideMetaSuggestions(field);
     },
 
+    // 日期选择器默认总是有值（回填成笔记日期），所以不能光看它有没有值，
+    // 要跟「打开这篇笔记时的日期」比：没改就用精确时间，改了才按该日期归档。
+    _resolveUpdatedAt(dateValue) {
+        const picked = String(dateValue || '').slice(0, 10);
+        const opened = String(this._openedDate || '').slice(0, 10);
+
+        if (!picked || picked === opened) return serverNowIso();
+        return `${picked}T00:00:00.000Z`;
+    },
+
     _updateMetaStatus(dateValue) {
         if (!this.el.noteDateText || !this.el.nDate) return;
         const date = String(dateValue || '').slice(0, 10);
@@ -594,6 +620,8 @@ export const Editor = {
 
         this._setMetaCollapsed(false);
         this._updateMetaStatus(data.updatedAt);
+        // 记下打开时的日期，保存时用来判断用户是否主动改过归档日期。
+        this._openedDate = String(data.updatedAt || '').slice(0, 10);
 
         this.wrapper.style.display = 'flex';
 

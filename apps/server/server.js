@@ -9,6 +9,7 @@ import app from './index.js';
 import { scheduledGc } from './lib/scheduled.js';
 import { ensureSchema } from './lib/schema.js';
 import { ensureSyncSchema } from './lib/sync.js';
+import { maintenanceTask } from './lib/maintenance.js';
 import { db } from './lib/core.js';
 
 async function startup() {
@@ -51,6 +52,19 @@ async function startup() {
     mainApp.use('/*', async (c, next) => {
         await next();
         const p = c.req.path;
+
+        // 失败响应绝不能被长效缓存（一次瞬时的 404 不该留下一年）。
+        if (c.res.status >= 400) {
+            c.header('Cache-Control', 'no-store');
+            return;
+        }
+
+        // 认证媒体由 images.js 自己声明 private，API 由各路由声明，不覆盖。
+        if (p.startsWith('/api/') || p.startsWith('/img/') || p.startsWith('/video/')) return;
+
+        // 静态层已经给过策略就不要动它。
+        if (c.res.headers.get('Cache-Control')) return;
+
         if (IMMUTABLE_RE.test(p) || p.startsWith('/assets/')) {
             c.header('Cache-Control', 'public, max-age=31536000, immutable');
         }
@@ -80,6 +94,23 @@ async function startup() {
             + 'Start with SERVE_WEB=true to also serve the web UI.\n'
         ));
     }
+
+    // 备份恢复期间独占写通道。better-sqlite3 只有一个连接，恢复会长时间持有
+    // 写事务，其他写请求在这一刻进来要么撞锁超时，要么混进同一个事务。
+    mainApp.use('/api/*', async (c, next) => {
+        const task = maintenanceTask();
+        if (!task) return next();
+
+        const p = c.req.path;
+        if (p.startsWith('/api/backup') || p === '/api/login') return next();
+
+        const isWrite = ['POST', 'PUT', 'DELETE', 'PATCH'].includes(c.req.method);
+        if (isWrite) {
+            return c.json({ error: `Server busy: ${task} in progress, retry shortly.` }, 503);
+        }
+
+        return next();
+    });
 
     mainApp.route('/', app);
 

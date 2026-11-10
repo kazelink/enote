@@ -7,7 +7,9 @@
     "start": "node apps/server/server.js",
     "build:dist": "node scripts/build-web.mjs",
     "build:desktop": "tauri build --config src-tauri/tauri.conf.json",
-    "dist:check": "node scripts/check-dist.mjs"
+    "dist:check": "node scripts/check-dist.mjs",
+    "lint": "eslint .",
+    "test": "node --test tests/sync-protocol.test.mjs tests/maintenance.test.mjs"
   },
   "dependencies": {
     "@hono/node-server": "^1.11.1",
@@ -17,6 +19,8 @@
     "sanitize-html": "^2.11.0"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "^2.12.4"
+    "@tauri-apps/cli": "^2.12.4",
+    "eslint": "^9.39.5",
+    "globals": "^17.14.0"
   }
 }

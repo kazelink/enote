@@ -1,9 +1,42 @@
-import { getApiBase } from './api.js';
+import { authHeaders, Nonce, Token, getApiBase } from './api.js';
 import * as LocalDB from './localdb.js';
 
 const MEDIA_SRC_RE = /<(?:img|video|source)[^>]+src=["'](\/(?:img|video)\/[^"']+)["']/gi;
 const MAX_MEDIA_BYTES = 200 * 1024 * 1024;
 const MAX_CACHE_BYTES = 2 * 1024 * 1024 * 1024;
+// blob URL 延迟回收：足够覆盖视频 seek 和灯箱预览，又不至于长期泄漏内存。
+const BLOB_URL_TTL_MS = 120_000;
+
+// 把正文里的 /img/x、/video/x 换成「服务器绝对地址 + 令牌」，
+// 让编辑器在 Tauri（tauri://localhost）里也能显示图片。
+// 浏览器同源时 base 为空，原样返回。
+export function absolutizeMediaHtml(html) {
+    const base = getApiBase();
+    if (!base) return String(html || '');
+
+    const token = Token.get() || '';
+    const nonce = Nonce.get() || '';
+    const qs = token ? `?t=${encodeURIComponent(token)}&n=${encodeURIComponent(nonce)}` : '';
+
+    return String(html || '').replace(
+        /(src|href)=(["'])\/(img|video)\/([^"']+)\2/gi,
+        (_m, attr, quote, kind, key) => `${attr}=${quote}${base}/${kind}/${key}${qs}${quote}`
+    );
+}
+
+// 反向操作：存入本地库 / 同步给服务端之前，把绝对地址和令牌剥回相对路径。
+// 不剥的话，token 会写进笔记正文并跟着同步到别的设备（还会随过期失效）。
+export function relativizeMediaHtml(html) {
+    let out = String(html || '');
+    const base = getApiBase();
+    if (!base) return out;
+
+    const escaped = base.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return out.replace(
+        new RegExp(`${escaped}/(img|video)/([^"'?#\\s]+)(\\?[^"'\\s]*)?`, 'gi'),
+        '/$1/$2'
+    );
+}
 
 function extractMediaPaths(content) {
     const paths = new Set();
@@ -37,7 +70,11 @@ async function cacheMediaOne(path) {
         try {
             if (!(await hasByteBudget())) return null;
 
-            const res = await fetch(`${getApiBase()}${path}`, { credentials: 'include' });
+            // 桌面/移动壳里 Cookie 跨域带不上，必须显式带 token。
+            const res = await fetch(`${getApiBase()}${path}`, {
+                credentials: 'include',
+                headers: authHeaders()
+            });
             if (!res.ok) return null;
 
             const blob = await res.blob();
@@ -70,10 +107,11 @@ export async function hydrateMedia(root) {
         const applyBlob = (blob) => {
             if (!blob || !node.isConnected) return;
             const objectUrl = URL.createObjectURL(blob);
-            const release = () => URL.revokeObjectURL(objectUrl);
             node.setAttribute('src', objectUrl);
-            node.addEventListener('load', release, { once: true });
-            node.addEventListener('error', release, { once: true });
+            // 不能一 load 就 revoke：<video> 根本不触发 load（是 loadeddata），
+            // 拖动进度条时 blob 已失效会直接播放失败；Fancybox 打开大图读的
+            // 也是这个 src，立刻释放会得到一张裂图。延迟回收足够覆盖这些场景。
+            setTimeout(() => URL.revokeObjectURL(objectUrl), BLOB_URL_TTL_MS);
         };
 
         const record = await LocalDB.getMediaBlob(src).catch(() => null);

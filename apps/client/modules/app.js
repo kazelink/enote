@@ -5,8 +5,8 @@ import { swalConfirm, swalAlert, swalPrompt } from "./swal.js";
 import { Editor } from "./editor.js?v=5.8";
 import { Auth } from "./auth.js";
 import * as LocalDB from "./localdb.js";
-import { startSyncEngine, SyncStatus, queueNoteDelete } from "./sync.js";
-import { hydrateMedia, pruneOrphanMedia } from "./media.js";
+import { startSyncEngine, SyncStatus, queueNoteDelete, syncNow } from "./sync.js";
+import { hydrateMedia, pruneOrphanMedia, absolutizeMediaHtml } from "./media.js";
 import { renderArchivePayload } from "../shared/render.js";
 
 const MAX_RESTORE_FILE_BYTES = 100 * 1024 * 1024;
@@ -30,23 +30,9 @@ function normalizeServerUrl(raw) {
     return null;
   }
 }
-function rewriteMediaUrls(html) {
-  const base = getApiBase();
-  if (!base) return html;
-
-  const token = Token.get() || "";
-  const nonce = Nonce.get() || "";
-  const qs = token ? `?t=${encodeURIComponent(token)}&n=${encodeURIComponent(nonce)}` : "";
-
-  return html.replace(
-    /(src|href)=(["'])\/(img|video)\/([^"']+)\2/gi,
-    (_m, attr, quote, kind, key) => `${attr}=${quote}${base}/${kind}/${key}${qs}${quote}`
-  );
-}
-
 function ensureLazyMedia(content) {
   const html = String(content || "").replace(/<img (?![^>]*\bloading=["']?lazy)/gi, '<img loading="lazy" ');
-  return rewriteMediaUrls(html);
+  return absolutizeMediaHtml(html);
 }
 
 function renderNotesHomeState() {
@@ -147,7 +133,7 @@ async function withLoading(fn, errorTitle = null, errorFallback = "Operation fai
 const COLLAPSE_STORAGE_KEY = "enote_collapsed_categories";
 
 const App = {
-  _views: {}, _popstateHandler: null, _restoreInFlight: false, _searchPanelOpen: false, _folderTreeCache: null, _tagCloudCache: null, _tagCloudExpanded: false, _tagCloudPanelCollapsed: true, _collapsedCategories: new Set(), _collapsedStateLoaded: false, _folderPanelCollapsed: false, _currentNote: null, _currentNoteFresh: false, _notePathHint: null, _treeContextState: { scope: "root", category: "" }, _lastFolderTreeHtml: null, _lastTagCloudHtml: null, _loadSeq: 0, _localRowsCache: null,
+  _views: {}, _popstateHandler: null, _restoreInFlight: false, _searchPanelOpen: false, _folderTreeCache: null, _tagCloudCache: null, _tagCloudExpanded: false, _tagCloudPanelCollapsed: true, _collapsedCategories: new Set(), _collapsedStateLoaded: false, _folderPanelCollapsed: false, _currentNote: null, _currentNoteFresh: false, _notePathHint: null, _treeContextState: { scope: "root", category: "" }, _lastFolderTreeHtml: null, _lastTagCloudHtml: null, _loadSeq: 0, _localRowsCache: null, _localRowsRev: -1, _refreshTimer: null,
 
   _resetListContent() {
     ["home-entry-list", "category-entry-list", "entry-list"].forEach(id => {
@@ -171,10 +157,11 @@ const App = {
     try { localStorage.setItem(COLLAPSE_STORAGE_KEY, JSON.stringify([...this._collapsedCategories])); } catch { }
   },
 
-  _startLocalSync() {
+  async _startLocalSync() {
     if (this._syncStarted) return;
     this._syncStarted = true;
 
+    await LocalDB.migrateTombstones().catch(() => {});
     startSyncEngine();
     this._renderSyncBadge(SyncStatus);
 
@@ -208,6 +195,7 @@ const App = {
     el.title = "";
 
     const pending = Number(s.pending) || 0;
+    const rejected = Array.isArray(s.rejectedIds) ? s.rejectedIds.length : 0;
 
     if (s.state === "idle" && !s.lastSyncAt) {
       el.textContent = pending ? `待上传 ${pending}` : "";
@@ -219,6 +207,11 @@ const App = {
       if (pending) {
         el.textContent = `待上传 ${pending}`;
         el.className = "sync-stat active";
+      } else if (rejected) {
+        // 被服务端拒绝的笔记已隔离在本地，正文没丢，但要让人知道没同步上去。
+        el.textContent = `${rejected} 条未同步`;
+        el.className = "sync-stat active warn";
+        el.title = "有笔记被服务器拒绝，打开后重新保存即可再次尝试";
       } else if (s.didWork) {
         el.textContent = "已同步";
         el.className = "sync-stat active success";
@@ -293,6 +286,8 @@ const App = {
       this._renderAuthServerAddress();
 
       if (Nonce.get() && Token.get()) {
+        // 旧版本的墓碑要先迁到删除队列并清出主表，否则会既占空间又被当正常数据读。
+        await LocalDB.migrateTombstones().catch(() => {});
         this._localReady = (await LocalDB.readMeta("initialized", 0)) === 1;
         this._startLocalSync();
         await this.loadView();
@@ -323,7 +318,6 @@ const App = {
 
   async loadView(options = {}) {
     const seq = ++this._loadSeq;
-    this._localRowsCache = null;
     if (!options.quiet && !options.pageTurn) this._resetListContent();
     if (options.pageTurn) this._setPaginationBusy();
     syncStateFromLocation();
@@ -447,9 +441,14 @@ const App = {
   },
 
   _localRows() {
-    if (!this._localRowsCache) {
+    // 只在本地库真的被写过之后才重读。以前是在每次 loadView 开头无条件清空，
+    // 于是切目录、翻页、开关笔记都要 getAll() 一遍全库（含所有正文）。
+    const revision = LocalDB.notesRevision();
+    if (!this._localRowsCache || this._localRowsRev !== revision) {
+      this._localRowsRev = revision;
       this._localRowsCache = LocalDB.allNotes().catch((e) => {
         this._localRowsCache = null;
+        this._localRowsRev = -1;
         throw e;
       });
     }
@@ -582,7 +581,7 @@ const App = {
     this._syncTagCloudPanelControls();
   },
 
-  _invalidateSidebarCaches() { this._localRowsCache = null; this._folderTreeCache = this._tagCloudCache = null; this._tagCloudExpanded = false; this._lastFolderTreeHtml = this._lastTagCloudHtml = null; },
+  _invalidateSidebarCaches() { this._localRowsCache = null; this._localRowsRev = -1; this._folderTreeCache = this._tagCloudCache = null; this._tagCloudExpanded = false; this._lastFolderTreeHtml = this._lastTagCloudHtml = null; },
   toggleTagCloudExpanded() { if ((this._tagCloudCache || []).length > TAG_PREVIEW_LIMIT) { this._tagCloudExpanded = !this._tagCloudExpanded; this._renderTagCloud(); } },
   toggleTagCloudPanel() {
     this._tagCloudPanelCollapsed = !this._tagCloudPanelCollapsed;
@@ -822,6 +821,9 @@ const App = {
       this._folderTreeCache = null;
       const nextRoute = routeCallback ? routeCallback(res, newName) : null;
       if (nextRoute) this.route(nextRoute); else await this.loadView();
+      // 目录树是从本地笔记聚合出来的：服务端改完了，本地库还是旧的。
+      // 不拉一次的话，改名/新建在界面上毫无反应，要等下一次自动同步。
+      syncNow({ force: true }).catch(() => {});
     }, `${oldName ? 'Rename' : 'Create'} Failed`);
   },
   async createCategory() { this._handleFolderAction("POST", { category: "" }, "New Category", "Create a top-level folder for your notes.", "Major category", (res) => ({ view: "category", category: res.category, subcategory: "", note: "", q: "", tag: "", page: 1 })); },
@@ -843,6 +845,7 @@ const App = {
         this._invalidateSidebarCaches();
         if (String(State.tag || "") === tag) this.route({ tag: newName });
         else await this.loadView();
+        syncNow({ force: true }).catch(() => {});
       }, "Rename Failed");
       return;
     }
@@ -858,11 +861,43 @@ const App = {
 
   async _deleteFolder(params, name, isCategory, successRoute) {
     if (!await swalConfirm(`Delete ${isCategory ? 'Category' : 'Subfolder'}?`, `This will delete "${name}" and all notes inside it.`)) return;
-    await withLoading(async () => {
+
+    // 本地库还没就绪（首次打开、同步中）只能走在线接口。
+    if (!this._localReady) {
+      await withLoading(async () => {
+        await API.req("folders", params, "DELETE");
+        this._invalidateSidebarCaches();
+        if (successRoute) this.route(successRoute); else await this.loadView();
+        syncNow({ force: true }).catch(() => {});
+      }, "Delete Failed", "Unable to delete folder.");
+      return;
+    }
+
+    // 本地优先：目录树是按 notes 的 category/subcategory 聚合出来的，
+    // 所以把这个目录下的笔记从本地库物理删掉，树会立刻少一项，无需等网络。
+    const sub = params.subcategory || "";
+    const rows = await this._localRows();
+    const targets = rows
+      .filter((n) => !n._deleted && n.category === params.category && (!sub || n.subcategory === sub))
+      .map((n) => ({ id: n.id, baseSeq: n._baseSeq }));
+
+    if (targets.length) await LocalDB.deleteNotesLocal(targets);
+
+    this._invalidateSidebarCaches();
+    if (successRoute) this.route(successRoute);
+    else this._scheduleListRefresh();
+
+    UI.setStatus("loading");
+    try {
       await API.req("folders", params, "DELETE");
-      this._invalidateSidebarCaches();
-      if (successRoute) this.route(successRoute); else await this.loadView();
-    }, "Delete Failed", "Unable to delete folder.");
+      // 服务端是整批删的，本地排队等待逐条推送的删除可以一并清掉。
+      if (targets.length) await LocalDB.clearDeletions(targets.map((item) => item.id));
+      UI.setStatus("ok"); resetStatusLater("ok");
+    } catch (e) {
+      // 不回滚本地：删除队列还在，下一轮 push 会逐条补推，最终一致。
+      UI.setStatus("err"); resetStatusLater("err");
+      swalAlert("Delete Failed", e?.message || "Removed locally; it will sync when the server is reachable.", "error");
+    }
   },
   deleteCategoryByEncoded(e) { const c = decodeURIComponent(e || ""); if (c) this._deleteFolder({ category: c }, c, true, State.category === c ? { view: "index", category: "", subcategory: "", note: "", q: "", tag: "", page: 1 } : null); },
   deleteSubcategoryByEncoded(eC, eS) { const c = decodeURIComponent(eC || ""), s = decodeURIComponent(eS || ""); if (c && s) this._deleteFolder({ category: c, subcategory: s }, s, false, State.category === c && State.subcategory === s ? { view: "category", category: c, subcategory: "", note: "", q: "", tag: "", page: 1 } : null); },
@@ -1020,19 +1055,43 @@ const App = {
   },
   async deleteEntry(id) {
     if (!await swalConfirm("Delete Note?", "This note and its unused local media will be removed.")) return;
+
+    // 先做即时反馈：行立刻消失、详情区显示占位，不必等落库和重新渲染。
     const d = Utils.$("note-detail"); if (d) d.innerHTML = renderLoading();
     document.querySelectorAll(`.archive-row[data-id="${CSS.escape(id)}"]`).forEach(el => el.remove());
-    await withLoading(async () => {
+
+    UI.setStatus("loading");
+    try {
       if (this._localReady) {
         await queueNoteDelete(id);
       } else {
         await API.req("delete", { id }, "DELETE");
       }
-      this._invalidateSidebarCaches();
-      if (State.view === "note" && State.note === id) {
-        this.route({ note: "" }, { quiet: true });
-      } else await this.loadView({ quiet: true });
-    });
+      UI.setStatus("ok"); resetStatusLater("ok");
+    } catch (e) {
+      UI.setStatus("err"); resetStatusLater("err");
+      swalAlert("Delete failed", e?.message || "Operation failed.", "error");
+      await this.loadView({ quiet: true });
+      return;
+    }
+
+    this._invalidateSidebarCaches();
+
+    if (State.view === "note" && State.note === id) {
+      this.route({ note: "" }, { quiet: true });
+    } else {
+      // 连续删除只重建一次列表：每次重建都要读全库并重画树/标签，
+      // 600 条约 50ms，连删 5 条就是 250ms 的纯浪费。
+      this._scheduleListRefresh();
+    }
+  },
+
+  _scheduleListRefresh() {
+    clearTimeout(this._refreshTimer);
+    this._refreshTimer = setTimeout(() => {
+      this._refreshTimer = null;
+      this.loadView({ quiet: true }).catch(() => {});
+    }, 80);
   },
 
   changePage(dir) {
@@ -1080,6 +1139,8 @@ const App = {
 
       const count = Number(payload?.count ?? 0), skipped = Number(payload?.skipped ?? 0);
       UI.setStatus("ok"); resetStatusLater("ok"); this._invalidateSidebarCaches(); await this.loadView();
+      // 恢复直接改的是服务端数据，本地库要靠一次拉取才能看到恢复的内容。
+      await syncNow({ force: true }).catch(() => {});
       swalAlert("Restore Complete", `Notes processed: ${count}\nInvalid skipped: ${skipped}`, "success");
     } catch (e) {
       UI.setStatus("err"); resetStatusLater("err");
