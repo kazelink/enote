@@ -43,7 +43,11 @@ function isMobileShell() {
 export function getApiBase() {
     try {
         const stored = String(localStorage.getItem('enote_api_base') || '').replace(/\/+$/, '');
-        if (stored) return stored;
+        if (stored) {
+            const fixed = upgradeStoredBase(stored);
+            if (fixed !== stored) localStorage.setItem('enote_api_base', fixed);
+            return fixed;
+        }
     } catch {}
 
     if (!isMobileShell() && isDesktopShell()) return 'http://127.0.0.1:3000';
@@ -55,6 +59,67 @@ export function setApiBase(url) {
     try {
         localStorage.setItem('enote_api_base', String(url || '').trim().replace(/\/+$/, ''));
     } catch {}
+}
+
+const IPV4_RE = /^(?:\d{1,3}\.){3}\d{1,3}$/;
+
+function hostOf(base) {
+    const rest = String(base || '').replace(/^[a-z]+:\/\//i, '');
+    const hostPort = rest.split(/[/?#]/)[0];
+    if (hostPort.startsWith('[')) {
+        const end = hostPort.indexOf(']');
+        return end === -1 ? hostPort.toLowerCase() : hostPort.slice(1, end).toLowerCase();
+    }
+    return hostPort.split(':')[0].toLowerCase();
+}
+
+function isLanHost(host) {
+    return IPV4_RE.test(host)
+        || host.includes(':')
+        || host === 'localhost'
+        || !host.includes('.')
+        || host.endsWith('.local');
+}
+
+export function normalizeServerBase(raw) {
+    let value = String(raw || '').trim();
+    if (!value) return null;
+
+    if (!/^[a-z]+:\/\//i.test(value)) {
+        value = `${isLanHost(hostOf(value)) ? 'http' : 'https'}://${value}`;
+    }
+    value = value.replace(/\/+$/, '');
+
+    try {
+        const url = new URL(value);
+        if (url.protocol !== 'http:' && url.protocol !== 'https:') return null;
+        return value;
+    } catch {
+        return null;
+    }
+}
+
+export function alternateServerBase(base) {
+    if (!/^https?:\/\//i.test(base)) return null;
+    if (isLanHost(hostOf(base))) return null;
+    if (/^https:\/\//i.test(base)) return base.replace(/^https:/i, 'http:');
+    return base.replace(/^http:/i, 'https:');
+}
+
+function upgradeStoredBase(stored) {
+    if (!/^http:\/\//i.test(stored)) return stored;
+    if (isLanHost(hostOf(stored))) return stored;
+
+    try {
+        const { port } = new URL(stored);
+        if (port && port !== '80' && port !== '443') return stored;
+    } catch {
+        return stored;
+    }
+
+    return stored
+        .replace(/^http:/i, 'https:')
+        .replace(/:(?:80|443)(?=\/|$)/, '');
 }
 
 function buildApiUrl(endpoint, data = {}) {

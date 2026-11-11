@@ -1,5 +1,5 @@
 import { Utils, State, escapeHtml } from "./dom.js";
-import { API, authHeaders, Nonce, Token, getApiBase, setApiBase, isDesktopShell } from "./api.js";
+import { API, authHeaders, Nonce, Token, getApiBase, setApiBase, isDesktopShell, normalizeServerBase, alternateServerBase } from "./api.js";
 import { UI } from "./ui.js";
 import { swalConfirm, swalAlert, swalPrompt } from "./swal.js";
 import { Editor } from "./editor.js?v=5.8";
@@ -17,18 +17,6 @@ function nextFrame() { return new Promise(r => requestAnimationFrame(r)); }
 function encodeInlineParam(val) { return encodeURIComponent(String(val ?? "")).replace(/'/g, "%27"); }
 function byFolderNameKey(a, b) { return String(a || "").toLowerCase().localeCompare(String(b || "").toLowerCase()); }
 
-function normalizeServerUrl(raw) {
-  let value = String(raw || "").trim();
-  if (!value) return null;
-  if (!/^https?:\/\//i.test(value)) value = `http://${value}`;
-  value = value.replace(/\/+$/, "");
-  try {
-    new URL(value);
-    return value;
-  } catch {
-    return null;
-  }
-}
 function ensureLazyMedia(content) {
   const html = String(content || "").replace(/<img (?![^>]*\bloading=["']?lazy)/gi, '<img loading="lazy" ');
   return absolutizeMediaHtml(html);
@@ -194,10 +182,11 @@ const App = {
 
       if (!entered) continue;
 
-      const normalized = normalizeServerUrl(entered);
+      const normalized = normalizeServerBase(entered);
       if (!normalized) continue;
 
-      setApiBase(normalized);
+      const probe = await this._probeServer(normalized);
+      setApiBase(probe.ok && probe.base ? probe.base : normalized);
       return true;
     }
 
@@ -919,6 +908,8 @@ const App = {
   },
 
   async saveServerAddress() {
+    if (this._serverProbeInFlight) return;
+
     const input = Utils.$("auth-server-input");
     const hint = Utils.$("auth-server-hint");
     const setHint = (text, kind) => {
@@ -932,27 +923,54 @@ const App = {
       return;
     }
 
-    const value = normalizeServerUrl(input?.value);
+    const value = normalizeServerBase(input?.value);
     if (!value) {
-      setHint("Invalid address, e.g. http://192.168.1.20:3000", "error");
+      setHint("Invalid address, e.g. https://notes.example.com or http://192.168.1.20:3000", "error");
       return;
     }
 
-    setHint("Connecting...", "");
-    const probe = await this._probeServer(value);
-    if (!probe.ok) {
-      setHint(`Connection failed: ${probe.reason}`, "error");
-      return;
+    this._serverProbeInFlight = true;
+    const saveBtn = document.querySelector(".auth-server-save");
+    const btnText = saveBtn ? saveBtn.textContent : "";
+    if (saveBtn) {
+      saveBtn.disabled = true;
+      saveBtn.textContent = "Connecting...";
     }
 
-    setApiBase(value);
-    setHint("Connected, reloading...", "ok");
-    location.reload();
+    try {
+      setHint("Connecting...", "");
+      const probe = await this._probeServer(value);
+      if (!probe.ok) {
+        setHint(`Connection failed: ${probe.reason}`, "error");
+        return;
+      }
+
+      setApiBase(probe.base || value);
+      setHint("Connected, reloading...", "ok");
+      location.reload();
+    } finally {
+      this._serverProbeInFlight = false;
+      if (saveBtn) {
+        saveBtn.disabled = false;
+        saveBtn.textContent = btnText;
+      }
+    }
   },
 
   async _probeServer(base) {
+    const first = await this._probeOnce(base);
+    if (first.ok) return first;
+
+    const alt = alternateServerBase(base);
+    if (!alt) return first;
+
+    const second = await this._probeOnce(alt);
+    return second.ok ? second : first;
+  },
+
+  async _probeOnce(base) {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 6000);
+    const timer = setTimeout(() => controller.abort(), 12000);
 
     try {
       const res = await fetch(`${base}/api/sync/state`, {
@@ -960,17 +978,33 @@ const App = {
         signal: controller.signal
       });
 
-      if (res.status >= 500) return { ok: false, reason: `Server returned HTTP ${res.status}` };
-      return { ok: true };
+      if (res.status >= 500) return { ok: false, base, reason: `Server returned HTTP ${res.status}` };
+
+      return { ok: true, base: this._baseFromResponse(base, res) };
     } catch (error) {
+      const detail = error?.message ? ` (${error.message})` : "";
       return {
         ok: false,
+        base,
         reason: error?.name === "AbortError"
-          ? "Connection timed out (no response in 6s)"
-          : "Network unreachable — check address, port and firewall"
+          ? "Connection timed out (no response in 12s)"
+          : `Network unreachable — check address, port and firewall${detail}`
       };
     } finally {
       clearTimeout(timer);
+    }
+  },
+
+  _baseFromResponse(base, res) {
+    if (!res.redirected || !res.url) return base;
+
+    try {
+      const target = new URL(res.url);
+      const origin = new URL(base);
+      if (target.hostname !== origin.hostname) return base;
+      return `${target.protocol}//${target.host}`;
+    } catch {
+      return base;
     }
   },
 
@@ -1091,6 +1125,12 @@ const App = {
         if (!await swalConfirm("Restore Backup?", "This will overwrite notes with matching IDs.")) inp.value = "";
         else await this.restoreBackup(inp.files[0]);
       }
+    });
+
+    document.addEventListener("keydown", (e) => {
+      if (e.key !== "Enter" || e.isComposing || e.target?.id !== "auth-server-input") return;
+      e.preventDefault();
+      this.saveServerAddress();
     });
   }
 };
