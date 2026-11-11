@@ -1,5 +1,4 @@
 import { Utils, State, escapeHtml } from './dom.js';
-import { UI } from './ui.js';
 import { swalAlert, swalUnsaved } from './swal.js';
 import { Upload } from './upload.js';
 import * as LocalDB from './localdb.js';
@@ -7,13 +6,12 @@ import { queueNoteSave, syncNow, SyncStatus, serverNowIso } from './sync.js';
 import { absolutizeMediaHtml, relativizeMediaHtml } from './media.js';
 import { sanitizePastedHtml } from './paste.js?v=5.5';
 import Squire from '../assets/squire.mjs';
+import { newId } from '../shared/id.js';
 import { IndentPlugin } from './editor-indent.js?v=5.4';
 import { ImagePlugin } from './editor-image.js';
 import { ColorPlugin } from './editor-color.js';
 import { TablePlugin } from './editor-table.js?v=5.5';
 
-// 与服务端 MAX_CONTENT_LENGTH 一致。超限的笔记服务端会逐条拒绝，
-// 与其等一次往返，不如保存前就告诉用户。
 const MAX_CONTENT_LENGTH = 500_000;
 import { ToolbarPlugin } from './editor-toolbar.js?v=5.6';
 
@@ -120,8 +118,6 @@ export const Editor = {
 
     _getEditorHTML() {
         const html = this.sq ? this.sq.getHTML() : (this.el.dText?.innerHTML || '');
-        // 编辑器里显示的是「绝对地址 + 令牌」，入库前必须剥回去，
-        // 否则令牌会写进正文并同步到别的设备。
         return isEmptyEditorHtml(html) ? '' : relativizeMediaHtml(html);
     },
 
@@ -196,9 +192,7 @@ export const Editor = {
 
         try {
             const existing = State.editingId ? await LocalDB.getNote(State.editingId) : null;
-            const id = String(State.editingId || (globalThis.crypto?.randomUUID
-                ? globalThis.crypto.randomUUID()
-                : `local-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`));
+            const id = String(State.editingId || newId());
 
             const savedNote = {
                 id,
@@ -234,8 +228,6 @@ export const Editor = {
                 q: '', tag: '', page: returnPage
             }, { quiet: true });
 
-            UI.setStatus('ok');
-            setTimeout(() => UI.setStatus(''), 2000);
             return true;
         } catch (e) {
             if (e?.code !== 'UNAUTHORIZED') swalAlert('Save Failed', e?.message || 'Unknown error', 'error');
@@ -572,8 +564,6 @@ export const Editor = {
         if (e.key === 'Escape') return e.preventDefault(), this._hideMetaSuggestions(field);
     },
 
-    // 日期选择器默认总是有值（回填成笔记日期），所以不能光看它有没有值，
-    // 要跟「打开这篇笔记时的日期」比：没改就用精确时间，改了才按该日期归档。
     _resolveUpdatedAt(dateValue) {
         const picked = String(dateValue || '').slice(0, 10);
         const opened = String(this._openedDate || '').slice(0, 10);
@@ -620,7 +610,6 @@ export const Editor = {
 
         this._setMetaCollapsed(false);
         this._updateMetaStatus(data.updatedAt);
-        // 记下打开时的日期，保存时用来判断用户是否主动改过归档日期。
         this._openedDate = String(data.updatedAt || '').slice(0, 10);
 
         this.wrapper.style.display = 'flex';
@@ -802,4 +791,3 @@ export const Editor = {
         if (xhr) this._activeUploads.add(xhr);
     }
 };
-

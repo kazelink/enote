@@ -117,4 +117,3 @@ router.put('/', authMiddleware, async (c) => {
 });
 
 export default router;
-

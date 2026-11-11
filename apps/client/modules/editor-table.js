@@ -257,4 +257,3 @@ export const TablePlugin = {
         return !!getCell(sq);
     }
 };
-

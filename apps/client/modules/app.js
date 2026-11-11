@@ -10,7 +10,6 @@ import { hydrateMedia, pruneOrphanMedia, absolutizeMediaHtml } from "./media.js"
 import { renderArchivePayload } from "../shared/render.js";
 
 const MAX_RESTORE_FILE_BYTES = 100 * 1024 * 1024;
-const STATUS_RESET_DELAY_MS = 2e3;
 const TAG_PREVIEW_LIMIT = 5;
 const STATE_KEYS = ["category", "subcategory", "note", "q", "tag"];
 
@@ -114,18 +113,14 @@ function buildLocationSearch() {
   return query ? `${path}?${query}` : path;
 }
 
-function resetStatusLater(statusKind) {
-  setTimeout(() => { if (statusKind !== "err" || !App._restoreInFlight) UI.setStatus(""); }, STATUS_RESET_DELAY_MS);
-}
-
 async function withLoading(fn, errorTitle = null, errorFallback = "Operation failed.") {
   UI.setStatus("loading");
   try {
     const res = await fn();
-    UI.setStatus("ok"); resetStatusLater("ok");
+    UI.setStatus("ok");
     return res;
   } catch (e) {
-    UI.setStatus("err"); resetStatusLater("err");
+    UI.setStatus("err");
     if (errorTitle) swalAlert(errorTitle, e?.message || errorFallback, "error");
   }
 }
@@ -162,8 +157,9 @@ const App = {
     this._syncStarted = true;
 
     await LocalDB.migrateTombstones().catch(() => {});
+    await LocalDB.migrateNonUuidIds().catch(() => {});
     startSyncEngine();
-    this._renderSyncBadge(SyncStatus);
+    UI.renderSync(SyncStatus);
 
     if (!this._dataChangedBound) {
       this._dataChangedBound = true;
@@ -175,7 +171,7 @@ const App = {
     }
 
     SyncStatus.on((s) => {
-      this._renderSyncBadge(s);
+      UI.renderSync(s);
 
       if (s.state !== "idle" || this._localReady) return;
       this._localReady = true;
@@ -184,62 +180,6 @@ const App = {
 
       pruneOrphanMedia().catch(() => {});
     });
-  },
-
-  _renderSyncBadge(s) {
-    const el = Utils.$("sync-stat");
-    if (!el) return;
-
-    clearTimeout(this._syncBadgeHideTimer);
-    clearTimeout(this._syncBadgeShowTimer);
-    el.title = "";
-
-    const pending = Number(s.pending) || 0;
-    const rejected = Array.isArray(s.rejectedIds) ? s.rejectedIds.length : 0;
-
-    if (s.state === "idle" && !s.lastSyncAt) {
-      el.textContent = pending ? `待上传 ${pending}` : "";
-      el.className = pending ? "sync-stat active" : "sync-stat";
-      return;
-    }
-
-    if (s.state === "idle") {
-      if (pending) {
-        el.textContent = `待上传 ${pending}`;
-        el.className = "sync-stat active";
-      } else if (rejected) {
-        // 被服务端拒绝的笔记已隔离在本地，正文没丢，但要让人知道没同步上去。
-        el.textContent = `${rejected} 条未同步`;
-        el.className = "sync-stat active warn";
-        el.title = "有笔记被服务器拒绝，打开后重新保存即可再次尝试";
-      } else if (s.didWork) {
-        el.textContent = "已同步";
-        el.className = "sync-stat active success";
-        this._syncBadgeHideTimer = setTimeout(() => {
-          el.textContent = "";
-          el.className = "sync-stat";
-        }, STATUS_RESET_DELAY_MS);
-      } else {
-        el.textContent = "";
-        el.className = "sync-stat";
-      }
-    } else if (s.state === "syncing") {
-      this._syncBadgeShowTimer = setTimeout(() => {
-        el.textContent = "同步中";
-        el.className = "sync-stat active";
-      }, 400);
-    } else if (s.state === "offline") {
-      el.textContent = "离线 · 本地可用";
-      el.className = "sync-stat active warn";
-    } else if (s.state === "error") {
-      el.textContent = "同步失败";
-      el.className = "sync-stat active error";
-      el.title = s.lastError ? `同步失败：${s.lastError}` : "同步失败，稍后自动重试";
-    } else {
-      el.textContent = "需重新登录";
-      el.className = "sync-stat active warn";
-      el.title = "登录状态已失效，请重新输入密码";
-    }
   },
 
   async _ensureServerAddress() {
@@ -286,7 +226,6 @@ const App = {
       this._renderAuthServerAddress();
 
       if (Nonce.get() && Token.get()) {
-        // 旧版本的墓碑要先迁到删除队列并清出主表，否则会既占空间又被当正常数据读。
         await LocalDB.migrateTombstones().catch(() => {});
         this._localReady = (await LocalDB.readMeta("initialized", 0)) === 1;
         this._startLocalSync();
@@ -388,7 +327,6 @@ const App = {
       if (e?.code === "UNAUTHORIZED") return;
       console.error("View load failed:", e);
       UI.setStatus("err");
-      resetStatusLater("err");
     }
   },
 
@@ -441,8 +379,6 @@ const App = {
   },
 
   _localRows() {
-    // 只在本地库真的被写过之后才重读。以前是在每次 loadView 开头无条件清空，
-    // 于是切目录、翻页、开关笔记都要 getAll() 一遍全库（含所有正文）。
     const revision = LocalDB.notesRevision();
     if (!this._localRowsCache || this._localRowsRev !== revision) {
       this._localRowsRev = revision;
@@ -821,8 +757,6 @@ const App = {
       this._folderTreeCache = null;
       const nextRoute = routeCallback ? routeCallback(res, newName) : null;
       if (nextRoute) this.route(nextRoute); else await this.loadView();
-      // 目录树是从本地笔记聚合出来的：服务端改完了，本地库还是旧的。
-      // 不拉一次的话，改名/新建在界面上毫无反应，要等下一次自动同步。
       syncNow({ force: true }).catch(() => {});
     }, `${oldName ? 'Rename' : 'Create'} Failed`);
   },
@@ -862,7 +796,6 @@ const App = {
   async _deleteFolder(params, name, isCategory, successRoute) {
     if (!await swalConfirm(`Delete ${isCategory ? 'Category' : 'Subfolder'}?`, `This will delete "${name}" and all notes inside it.`)) return;
 
-    // 本地库还没就绪（首次打开、同步中）只能走在线接口。
     if (!this._localReady) {
       await withLoading(async () => {
         await API.req("folders", params, "DELETE");
@@ -873,8 +806,6 @@ const App = {
       return;
     }
 
-    // 本地优先：目录树是按 notes 的 category/subcategory 聚合出来的，
-    // 所以把这个目录下的笔记从本地库物理删掉，树会立刻少一项，无需等网络。
     const sub = params.subcategory || "";
     const rows = await this._localRows();
     const targets = rows
@@ -890,12 +821,11 @@ const App = {
     UI.setStatus("loading");
     try {
       await API.req("folders", params, "DELETE");
-      // 服务端是整批删的，本地排队等待逐条推送的删除可以一并清掉。
       if (targets.length) await LocalDB.clearDeletions(targets.map((item) => item.id));
-      UI.setStatus("ok"); resetStatusLater("ok");
+      UI.setStatus("ok");
+      syncNow({ force: true }).catch(() => {});
     } catch (e) {
-      // 不回滚本地：删除队列还在，下一轮 push 会逐条补推，最终一致。
-      UI.setStatus("err"); resetStatusLater("err");
+      UI.setStatus("err");
       swalAlert("Delete Failed", e?.message || "Removed locally; it will sync when the server is reachable.", "error");
     }
   },
@@ -1056,20 +986,18 @@ const App = {
   async deleteEntry(id) {
     if (!await swalConfirm("Delete Note?", "This note and its unused local media will be removed.")) return;
 
-    // 先做即时反馈：行立刻消失、详情区显示占位，不必等落库和重新渲染。
     const d = Utils.$("note-detail"); if (d) d.innerHTML = renderLoading();
     document.querySelectorAll(`.archive-row[data-id="${CSS.escape(id)}"]`).forEach(el => el.remove());
 
-    UI.setStatus("loading");
     try {
       if (this._localReady) {
         await queueNoteDelete(id);
       } else {
         await API.req("delete", { id }, "DELETE");
+        UI.setStatus("ok");
       }
-      UI.setStatus("ok"); resetStatusLater("ok");
     } catch (e) {
-      UI.setStatus("err"); resetStatusLater("err");
+      UI.setStatus("err");
       swalAlert("Delete failed", e?.message || "Operation failed.", "error");
       await this.loadView({ quiet: true });
       return;
@@ -1080,8 +1008,6 @@ const App = {
     if (State.view === "note" && State.note === id) {
       this.route({ note: "" }, { quiet: true });
     } else {
-      // 连续删除只重建一次列表：每次重建都要读全库并重画树/标签，
-      // 600 条约 50ms，连删 5 条就是 250ms 的纯浪费。
       this._scheduleListRefresh();
     }
   },
@@ -1138,12 +1064,11 @@ const App = {
       if (!res.ok) throw new Error(payload?.error || "Restore failed.");
 
       const count = Number(payload?.count ?? 0), skipped = Number(payload?.skipped ?? 0);
-      UI.setStatus("ok"); resetStatusLater("ok"); this._invalidateSidebarCaches(); await this.loadView();
-      // 恢复直接改的是服务端数据，本地库要靠一次拉取才能看到恢复的内容。
+      UI.setStatus("ok"); this._invalidateSidebarCaches(); await this.loadView();
       await syncNow({ force: true }).catch(() => {});
       swalAlert("Restore Complete", `Notes processed: ${count}\nInvalid skipped: ${skipped}`, "success");
     } catch (e) {
-      UI.setStatus("err"); resetStatusLater("err");
+      UI.setStatus("err");
       swalAlert("Restore Failed", e?.message || "Restore failed.", "error");
     } finally { clearRestoreInput(); this._restoreInFlight = false; }
   },
@@ -1171,4 +1096,3 @@ const App = {
 };
 
 App.init();
-

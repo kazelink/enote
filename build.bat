@@ -16,7 +16,6 @@ if not exist "node_modules\.bin\tauri.cmd" (
     exit /b 1
 )
 
-rem Rust lives under the user profile; a freshly opened terminal may lack it.
 if exist "%USERPROFILE%\.cargo\bin\cargo.exe" (
     set "PATH=%USERPROFILE%\.cargo\bin;%PATH%"
 ) else (
@@ -25,16 +24,12 @@ if exist "%USERPROFILE%\.cargo\bin\cargo.exe" (
     echo.
 )
 
-rem A stale cargo/rustc from an interrupted build keeps .cargo-build-lock open,
-rem which surfaces as "failed to open ... 拒绝访问 (os error 5)".
 taskkill /F /IM cargo.exe >nul 2>&1
 taskkill /F /IM rustc.exe >nul 2>&1
 if exist "src-tauri\target\release\.cargo-build-lock" (
     del /F /Q "src-tauri\target\release\.cargo-build-lock" >nul 2>&1
 )
 
-rem build-web.mjs regenerates dist; clearing it avoids stale assets and the
-rem safe-delete timeout some environments hit when it removes the tree itself.
 if exist "dist" rd /S /Q "dist" >nul 2>&1
 
 echo [1/1] Building and packaging the exe...

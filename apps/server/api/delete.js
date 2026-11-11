@@ -21,4 +21,3 @@ router.delete('/', authMiddleware, async (c) => {
 });
 
 export default router;
-

@@ -72,4 +72,3 @@ export function sanitizeContent(html) {
 
   return sanitizeHtml(html, SANITIZE_OPTIONS);
 }
-

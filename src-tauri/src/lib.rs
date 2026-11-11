@@ -21,9 +21,6 @@ pub fn run() {
     #[allow(unused_mut)]
     let mut builder = tauri::Builder::default();
 
-    // On mobile the window comes from tauri.android.conf.json: wry has no
-    // multi-window support there, so building one by hand has no effect and
-    // would leave the webview unattached.
     #[cfg(desktop)]
     {
         builder = builder.setup(|app| {

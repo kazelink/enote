@@ -81,8 +81,6 @@ async function cleanupOrphanedMediaFast() {
     let scanned = 0;
     let deleted = 0;
 
-    // rebuildNoteMediaIndex 是「先 DELETE 再分批重建」，中途崩溃会留下空索引。
-    // 这种情况下按「没人引用」判定会把所有媒体文件删光，所以先做个自检。
     const indexed = Number((await db.prepare('SELECT COUNT(*) AS n FROM note_media').first())?.n) || 0;
     const totalNotes = Number((await db.prepare('SELECT COUNT(*) AS n FROM notes').first())?.n) || 0;
     if (totalNotes > 0 && indexed === 0) {
@@ -119,7 +117,6 @@ async function cleanupOrphanedMediaFast() {
 }
 
 export async function scheduledGc() {
-    // 备份恢复会重建 note_media、独占写通道，GC 这时候不该插进来。
     if (maintenanceTask()) {
         console.log('Media GC: skipped (maintenance in progress).');
         return;
@@ -147,4 +144,3 @@ export async function scheduledGc() {
         console.error('Scheduled GC failed:', e);
     }
 }
-

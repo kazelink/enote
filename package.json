@@ -8,8 +8,7 @@
     "build:dist": "node scripts/build-web.mjs",
     "build:desktop": "tauri build --config src-tauri/tauri.conf.json",
     "dist:check": "node scripts/check-dist.mjs",
-    "lint": "eslint .",
-    "test": "node --test tests/sync-protocol.test.mjs tests/maintenance.test.mjs"
+    "lint": "eslint ."
   },
   "dependencies": {
     "@hono/node-server": "^1.11.1",

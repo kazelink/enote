@@ -12,7 +12,6 @@ function normalizeMime(v) {
 function showUploadError(msg) {
     UI.setStatus('err');
     swalAlert('Upload Error', msg, 'error');
-    setTimeout(() => UI.setStatus(''), 2000);
 }
 
 function createProgressWidget(editorWrapper, mime, cancelCb) {
@@ -76,7 +75,6 @@ export const Upload = {
         const widget = createProgressWidget(editorWrapper, mime, () => {
             xhr.abort();
             if (widget?.container) widget.container.remove();
-            UI.setStatus('');
         });
 
         xhr.upload.onprogress = (e) => {
@@ -141,4 +139,3 @@ export const Upload = {
         return xhr;
     }
 };
-

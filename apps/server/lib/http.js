@@ -24,4 +24,3 @@ export async function parseJsonBody(c, invalidMessage = 'Invalid JSON payload') 
     return { value: null, response: jsonError(c, invalidMessage, 400) };
   }
 }
-

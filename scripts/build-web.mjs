@@ -116,11 +116,8 @@ html = html.replace(
     `<head$1>\n    <base href="./">\n    ${ERROR_REPORTER}`
 );
 
-// index.html is the single entry point for both the browser and the Tauri
-// shell (whose window url is "index.html"), so it is rewritten in place.
 await writeFile(path.join(distDir, 'index.html'), html, 'utf8');
 
 console.log(
     `Prepared dist/ for packaging (${stripped} files stripped of ?v=, ${mjsRewritten} files rewrote .mjs refs)`
 );
-

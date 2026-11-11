@@ -53,16 +53,13 @@ async function startup() {
         await next();
         const p = c.req.path;
 
-        // 失败响应绝不能被长效缓存（一次瞬时的 404 不该留下一年）。
         if (c.res.status >= 400) {
             c.header('Cache-Control', 'no-store');
             return;
         }
 
-        // 认证媒体由 images.js 自己声明 private，API 由各路由声明，不覆盖。
         if (p.startsWith('/api/') || p.startsWith('/img/') || p.startsWith('/video/')) return;
 
-        // 静态层已经给过策略就不要动它。
         if (c.res.headers.get('Cache-Control')) return;
 
         if (IMMUTABLE_RE.test(p) || p.startsWith('/assets/')) {
@@ -81,8 +78,6 @@ async function startup() {
 
     const serveWeb = process.env.SERVE_WEB === 'true';
 
-    // The Docker image copies apps/client to /app/client, while a checkout keeps
-    // it at apps/client. Pick whichever exists so SERVE_WEB works in both.
     const clientRoot = existsSync('./client') ? './client' : './apps/client';
 
     if (serveWeb) {
@@ -95,8 +90,6 @@ async function startup() {
         ));
     }
 
-    // 备份恢复期间独占写通道。better-sqlite3 只有一个连接，恢复会长时间持有
-    // 写事务，其他写请求在这一刻进来要么撞锁超时，要么混进同一个事务。
     mainApp.use('/api/*', async (c, next) => {
         const task = maintenanceTask();
         if (!task) return next();
@@ -143,4 +136,3 @@ async function startup() {
 }
 
 startup().catch(console.error);
-

@@ -79,4 +79,3 @@ export async function loadFolderTree(db) {
 
   return result.results.map(parseFolderRow);
 }
-

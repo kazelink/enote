@@ -123,8 +123,6 @@ export async function getLatestSeqByNoteIds(ids) {
 export async function pruneSyncChanges({ retainDays = 30 } = {}) {
   const cutoff = new Date(Date.now() - retainDays * 24 * 60 * 60 * 1000).toISOString();
 
-  // 每条实体必须保留最新一行：since=0 的全量拉取只读 sync_changes，
-  // 如果某篇笔记 30 天没动过就被清光记录，新设备将永远拉不到它。
   await db.prepare(
     `DELETE FROM sync_changes
      WHERE changed_at < ?
@@ -181,4 +179,3 @@ export async function listAllFolders() {
   ).all();
   return results || [];
 }
-

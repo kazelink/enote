@@ -5,4 +5,3 @@ export const CONFIG = {
     LOCK_MS: 15 * 60 * 1000
   }
 };
-

@@ -44,8 +44,6 @@ router.get('/export', authMiddleware, async (c) => {
 });
 
 router.post('/restore', authMiddleware, async (c) => {
-  // 恢复期间独占写通道：其余写请求直接收到 503，而不是撞锁超时
-  // 或者把数据混进恢复事务里一起回滚。
   if (maintenanceTask()) {
     return jsonError(c, `Server busy: ${maintenanceTask()} in progress, retry shortly.`, 503);
   }
@@ -86,4 +84,3 @@ router.post('/restore', authMiddleware, async (c) => {
 });
 
 export default router;
-

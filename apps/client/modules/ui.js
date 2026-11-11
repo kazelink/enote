@@ -1,12 +1,105 @@
-import { Utils, RI_SVGS, loadScript } from './dom.js';
+import { Utils, STATUS_SVGS, loadScript } from './dom.js';
 
 const AUTH_ARROW_SVG = '<svg viewBox="0 0 24 24"><path d="M16.172 11l-5.364-5.364 1.414-1.414L20 12l-7.778 7.778-1.414-1.414L16.172 13H4v-2z"></path></svg>';
 
-const STATUS_ICONS = {
-    loading: RI_SVGS.loader,
-    ok: '<i class="ri-check-line"></i>',
-    err: '<i class="ri-close-line" style="color:var(--danger)"></i>'
+const RESULT_HOLD_MS = 2000;        
+const RESULT_COOLDOWN_MS = 2500;    
+
+const OP_VIEW = {
+    loading: { icon: STATUS_SVGS.spin, cls: '', label: 'Working' },
+    ok: { icon: STATUS_SVGS.check, cls: 'success', label: 'Done' },
+    err: { icon: STATUS_SVGS.cross, cls: 'error', label: 'Failed' }
 };
+
+const Status = {
+    op: '',             
+    sync: null,         
+    ackedSyncAt: 0,     
+    cooldownUntil: 0,   
+    key: '',            
+    holdTimer: null,
+    opTimer: null
+};
+
+function syncView(s, now) {
+    if (!s) return null;
+
+    if (s.state === 'syncing') {
+        return { icon: STATUS_SVGS.spin, cls: '', label: 'Syncing' };
+    }
+
+    if (s.state === 'idle') {
+        const pending = Number(s.pending) || 0;
+        if (pending) {
+            return { icon: STATUS_SVGS.spin, cls: '', label: `${pending} change(s) waiting to upload` };
+        }
+
+        const rejected = Array.isArray(s.rejectedIds) ? s.rejectedIds.length : 0;
+        if (rejected) {
+            return { icon: STATUS_SVGS.cross, cls: 'error', label: `${rejected} note(s) rejected by the server — open and save again to retry` };
+        }
+
+        if (s.didWork && s.lastSyncAt && s.lastSyncAt !== Status.ackedSyncAt) {
+            if (now < Status.cooldownUntil) {
+                Status.ackedSyncAt = s.lastSyncAt;
+                return null;
+            }
+            return { icon: STATUS_SVGS.check, cls: 'success', label: 'Synced', autoAck: true };
+        }
+        return null;
+    }
+
+    if (s.state === 'offline') {
+        return { icon: STATUS_SVGS.offline, cls: 'warn', label: 'Offline — changes are saved locally and sync when the server is reachable' };
+    }
+
+    if (s.state === 'error' || s.state === 'auth') {
+        return {
+            icon: STATUS_SVGS.cross,
+            cls: 'error',
+            label: s.state === 'auth'
+                ? 'Session expired, sign in again'
+                : (s.lastError ? `Sync failed: ${s.lastError}` : 'Sync failed, will retry automatically')
+        };
+    }
+
+    return null;
+}
+
+function paintStatus() {
+    const el = Utils.$('status');
+    if (!el) return;
+
+    clearTimeout(Status.holdTimer);
+    Status.holdTimer = null;
+
+    let view = OP_VIEW[Status.op] || null;
+    if (!view) view = syncView(Status.sync, Date.now());
+
+    const key = view ? `${view.icon}|${view.cls}` : '';
+    if (Status.key !== key) {
+        Status.key = key;
+        el.innerHTML = view ? view.icon : '';
+    }
+
+    if (view) {
+        el.className = view.cls ? `sync-stat active ${view.cls}` : 'sync-stat active';
+        el.title = view.label;
+        el.setAttribute('aria-label', view.label);
+    } else {
+        el.className = 'sync-stat';
+        el.title = '';
+        el.removeAttribute('aria-label');
+    }
+
+    if (view?.autoAck) {
+        Status.holdTimer = setTimeout(() => {
+            Status.holdTimer = null;
+            Status.ackedSyncAt = Status.sync?.lastSyncAt || 0;
+            paintStatus();
+        }, RESULT_HOLD_MS);
+    }
+}
 
 function resetAuthUi() {
     const authForm = Utils.$('auth-form');
@@ -70,11 +163,25 @@ function appendDivider(container) {
 
 export const UI = {
     setStatus(mode) {
-        const statusEl = Utils.$('op-status');
-        if (!statusEl) return;
+        Status.op = OP_VIEW[mode] ? mode : '';
+        clearTimeout(Status.opTimer);
+        Status.opTimer = null;
 
-        statusEl.className = `sync-stat active ${mode === 'ok' ? 'success' : ''}`.trim();
-        statusEl.innerHTML = STATUS_ICONS[mode] || '';
+        if (Status.op === 'ok' || Status.op === 'err') {
+            Status.cooldownUntil = Date.now() + RESULT_COOLDOWN_MS;
+            Status.opTimer = setTimeout(() => {
+                Status.opTimer = null;
+                Status.op = '';
+                paintStatus();
+            }, RESULT_HOLD_MS);
+        }
+
+        paintStatus();
+    },
+
+    renderSync(snapshot) {
+        if (snapshot) Status.sync = snapshot;
+        paintStatus();
     },
 
     renderBreadcrumb({ view, category, subcategory, q, tag, currentNote = null, notePathHint = null, onNavigate = null }) {
@@ -182,4 +289,3 @@ export const UI = {
         });
     }
 };
-

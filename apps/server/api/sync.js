@@ -56,11 +56,6 @@ router.get('/pull', authMiddleware, async (c) => {
   if (since > 0) {
     const minSeq = await getMinSeq();
 
-    // 两种游标失效的情况：
-    // 1) since > latestSeq —— 服务端换库 / 恢复旧备份后序号变小，增量永远是空，
-    //    客户端会一直卡在旧游标上同步不到任何东西；
-    // 2) since < minSeq - 1 —— 客户端游标早于保留窗口。
-    // 两种都必须全量重来。
     const cursorUnusable = since > latestSeq || !minSeq || since < minSeq - 1;
 
     if (cursorUnusable) {
@@ -199,8 +194,6 @@ router.post('/push', authMiddleware, async (c) => {  const { value: body, respon
     return jsonError(c, `Too many items in one push (max ${MAX_ITEMS_PER_PUSH})`, 413);
   }
 
-  // 逐条校验：一条超长/字段缺失的笔记只拒绝它自己，不拖垮整批。
-  // 整批拒绝会让客户端永远卡在同一条毒丸上（每轮都失败、退避、重试）。
   const parsedNotes = [];
   const rejected = [];
 
@@ -227,7 +220,6 @@ router.post('/push', authMiddleware, async (c) => {  const { value: body, respon
 
   const allIds = [...new Set([...parsedNotes.map((n) => n.id), ...deletionIds.map((d) => d.id)])];
 
-  // 全部被拒时不能继续：下面按 id 数量拼 IN 列表，空数组会生成非法 SQL。
   if (!allIds.length) {
     return c.json({
       applied: 0,
@@ -290,7 +282,6 @@ router.post('/push', authMiddleware, async (c) => {  const { value: body, respon
     confirmed.push({ id: note.id, seq: null });
   }
 
-  // 服务端是否还有这篇笔记，一次查完（避免逐条 SELECT）。
   const existingById = new Map();
   if (deletionIds.length) {
     const placeholders = deletionIds.map(() => '?').join(',');
@@ -301,8 +292,6 @@ router.post('/push', authMiddleware, async (c) => {  const { value: body, respon
   }
 
   const noteIdsToDelete = [];
-  // 服务端已经不存在：删除目标已达成。不能返回冲突——否则客户端既没有
-  // 可恢复的版本，也不会清队列，那条删除任务会永远留在本地反复重推。
   const alreadyGone = [];
 
   for (const item of deletionIds) {
@@ -394,4 +383,3 @@ router.get('/media', authMiddleware, async (c) => {
 });
 
 export default router;
-

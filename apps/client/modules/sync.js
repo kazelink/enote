@@ -15,9 +15,7 @@ export const SyncStatus = {
     pending: 0,
     didWork: false,
     conflicts: [],
-    // 本轮被服务端拒绝的条目
     rejected: [],
-    // 仍处于隔离状态（等待用户修改后重试）的笔记 id
     rejectedIds: [],
     _listeners: new Set(),
 
@@ -47,12 +45,24 @@ export function serverNowIso() {
 
 let backoffMs = 0;
 let backoffUntil = 0;
+let lastAttemptAt = 0;
 
 const MIN_SYNC_GAP_MS = 3_000;
 const MAX_RETRY_DELAY_MS = 5 * 60_000;
 
 function isOffline() {
     return typeof navigator !== 'undefined' && navigator.onLine === false;
+}
+
+function isNetworkFailure(error) {
+    if (!error) return false;
+    if (error.code === 'TIMEOUT') return true;
+    if (error instanceof TypeError) return true;
+    return /failed to fetch|network request failed|load failed|networkerror/i.test(String(error.message || ''));
+}
+
+function isUnreachable(error) {
+    return isOffline() || isNetworkFailure(error);
 }
 
 let retryTimer = null;
@@ -97,8 +107,6 @@ async function pushPending() {
         const { notes, deletions } = await LocalDB.pendingChanges(PUSH_BATCH);
         if (!notes.length && !deletions.length) break;
 
-        // 这一轮推进了多少条（成功 + 被拒）。被拒的会被隔离出队列，
-        // 所以算推进；如果一整轮什么都没推进，就是卡住了，再循环也没用。
         const progressedBefore = pushed + rejected.length;
 
         if (notes.length) {
@@ -108,8 +116,6 @@ async function pushPending() {
 
             for (const c of res.conflicts || []) conflicts.push(c);
 
-            // 服务端逐条拒绝的笔记（正文超长、字段非法等）：标记后不再重推，
-            // 否则下一轮 pendingChanges 又会取到它们，在批次里反复空转。
             if (res.rejected?.length) {
                 const snapshot = new Map(notes.map((n) => [n.id, n]));
                 await LocalDB.markNotesRejected(
@@ -139,7 +145,6 @@ async function pushPending() {
                 pushed += deletedIds.length;
             }
 
-            // id 非法等被服务端拒绝的删除项：留在队列里只会每轮重推。
             const rejectedDeletions = (res.rejected || []).map((item) => item.id).filter(Boolean);
             if (rejectedDeletions.length) {
                 await LocalDB.clearDeletions(rejectedDeletions);
@@ -150,19 +155,14 @@ async function pushPending() {
                 if (c.kind !== 'delete') continue;
 
                 if (c.note) {
-                    // 服务端有更新的版本，把笔记还回来，同时撤销本地删除意图，
-                    // 否则下一轮拉取会因为它还在队列里而被跳过。
                     await LocalDB.restoreFromServer(c.note, c.serverSeq || 0);
                     await LocalDB.clearDeletions([c.note.id]);
                 } else {
-                    // 服务端已经没有这篇笔记：删除目标已达成，清队列即可。
-                    // 新版服务端不会再这样返回，这里兜住旧版服务端。
                     await LocalDB.clearDeletions([c.id]);
                 }
             }
         }
 
-        // 一整轮没有任何推进：剩下的都是推不动的，直接停，避免空转。
         if (pushed + rejected.length === progressedBefore) break;
     }
 
@@ -246,6 +246,7 @@ export async function syncNow({ force = false } = {}) {
 
     clearRetry();
     running = true;
+    lastAttemptAt = Date.now();
     SyncStatus.update({ state: 'syncing', lastError: null });
 
     try {
@@ -271,6 +272,7 @@ export async function syncNow({ force = false } = {}) {
         return { ok: true, conflicts: pushed.conflicts, rejected: pushed.rejected };
     } catch (error) {
         const authFailure = error?.code === 'UNAUTHORIZED';
+        const unreachable = !authFailure && isUnreachable(error);
 
         if (!authFailure) {
             backoffMs = Math.min(backoffMs ? backoffMs * 2 : 5_000, 5 * 60_000);
@@ -279,10 +281,12 @@ export async function syncNow({ force = false } = {}) {
         }
 
         SyncStatus.update({
-            state: authFailure ? 'auth' : (isOffline() ? 'offline' : 'error'),
-            lastError: authFailure ? null : (error?.message || String(error))
+            state: authFailure ? 'auth' : (unreachable ? 'offline' : 'error'),
+            lastError: authFailure || unreachable ? null : (error?.message || String(error))
         });
-        if (!authFailure) console.error('Sync failed:', error);
+
+        if (unreachable) console.warn('Sync paused, server unreachable:', error?.message || error);
+        else if (!authFailure) console.error('Sync failed:', error);
         return { ok: false, error };
     } finally {
         running = false;
@@ -299,10 +303,16 @@ export function startSyncEngine() {
 
     setTimeout(() => { syncNow(); }, 300);
 
-    // 句柄不保存：引擎只启动一次（started 守卫），且没有停止入口。
-    setInterval(() => { syncNow(); }, AUTO_SYNC_MS);
+    setInterval(() => {
+        if (document.visibilityState === 'hidden') return;
+        syncNow();
+    }, AUTO_SYNC_MS);
 
-    window.addEventListener('focus', () => { syncNow(); });
+    window.addEventListener('focus', () => {
+        if (Date.now() - lastAttemptAt < MIN_SYNC_GAP_MS) return;
+        resetBackoff();
+        syncNow();
+    });
     window.addEventListener('online', () => {
         resetBackoff();
         clearRetry();
@@ -330,15 +340,12 @@ export async function queueNoteSave(note) {
 export async function queueNoteDelete(id) {
     await LocalDB.deleteNoteLocal(id);
     await refreshPending();
-    // 删除意图明确、数据量小，不必等满 1.2 秒的保存防抖窗口。
     scheduleSoon(300);
 }
 
 let soonTimer = null;
 let soonDueAt = 0;
 
-// 多次调用只保留最早的那个到期时间：删除（300ms）可以提前保存（1200ms）的排期，
-// 反之不会把已排好的任务往后推。
 function scheduleSoon(delay = 1200) {
     const due = Date.now() + delay;
     if (soonTimer && soonDueAt <= due) return;
@@ -351,4 +358,3 @@ function scheduleSoon(delay = 1200) {
         syncNow();
     }, delay);
 }
-

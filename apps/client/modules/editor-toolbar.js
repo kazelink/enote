@@ -360,4 +360,3 @@ export const ToolbarPlugin = {
         if (this._raf) { cancelAnimationFrame(this._raf); this._raf = null; }
     }
 };
-

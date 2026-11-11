@@ -68,4 +68,3 @@ export async function verifyToken(token, secret) {
     return p;
   } catch { return false; }
 }
-

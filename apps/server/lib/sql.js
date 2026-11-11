@@ -40,4 +40,3 @@ export const UPSERT_FOLDER_SQL = `
       ELSE folders.updated_at
     END
 `;
-

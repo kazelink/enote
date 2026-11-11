@@ -96,4 +96,3 @@ export const ImagePlugin = {
         if (this._raf) { cancelAnimationFrame(this._raf); this._raf = null; }
     }
 };
-

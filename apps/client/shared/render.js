@@ -101,4 +101,3 @@ export function renderArchivePayload({ notes, page, totalPages, hasFolderScope, 
 
     return `${body}${renderPagination(page, totalPages)}`;
 }
-

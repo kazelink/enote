@@ -46,8 +46,6 @@ export function getApiBase() {
         if (stored) return stored;
     } catch {}
 
-    // The desktop build may have a server on the same machine; a phone has none,
-    // so it stays empty and the first-run prompt asks for the address instead.
     if (!isMobileShell() && isDesktopShell()) return 'http://127.0.0.1:3000';
 
     return '';

@@ -10,13 +10,10 @@ services:
     volumes:
       - data:/app/data
     environment:
-      # !! CHANGE THESE IN .env FILE !!
       - APP_PASSWORD=${APP_PASSWORD}
       - JWT_SECRET=${JWT_SECRET}
       - DB_PATH=/app/data/enote.db
       - STORAGE_PATH=/app/data/storage
-      # API only by default; the desktop app is the client.
-      # Set to true to also serve the browser UI from this container.
       - SERVE_WEB=${SERVE_WEB:-false}
     restart: unless-stopped
 

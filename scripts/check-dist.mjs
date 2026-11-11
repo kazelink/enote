@@ -44,9 +44,6 @@ const stale = [];
 const missing = [];
 
 for (const rel of srcFiles) {
-  // index.html is rewritten in place by build-web.mjs (base href, relative
-  // asset paths), so it never matches the source byte-for-byte. Validated
-  // separately by the entry-html check below.
   if (rel.replace(/\\/g, '/') === 'index.html') continue;
 
   const srcPath = path.join(srcDir, rel);

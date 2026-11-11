@@ -1,4 +1,5 @@
 import { toLocalNote } from '../shared/note-shape.js';
+import { isUuid, newId } from '../shared/id.js';
 
 const DB_NAME = 'enote';
 const DB_VERSION = 1;
@@ -8,7 +9,6 @@ const STORE_MEDIA = 'media';
 const STORE_META = 'meta';
 
 const PENDING_DELETIONS_KEY = 'pending_deletions';
-// 被服务端拒绝、已隔离的笔记 id，用于状态栏提示（正文仍完整保留在本地）。
 const REJECTED_IDS_KEY = 'rejected_note_ids';
 
 let dbPromise = null;
@@ -79,9 +79,6 @@ async function withRead(storeName, start) {
     });
 }
 
-// notes store 的写入版本号。app.js 的列表缓存靠它判断是否需要重新读库：
-// 平时切换目录、翻页、开关笔记都不必全量读 IndexedDB，
-// 同时也不依赖调用方记得清缓存——漏清一处也不会显示陈旧数据。
 let notesWriteSeq = 0;
 
 export function notesRevision() {
@@ -109,7 +106,6 @@ export async function setCursor(seq) {
 
 export async function putNote(note, options) {
     const record = note._dirty !== undefined ? note : toLocalNote(note, options);
-    // 重新编辑即解除「被服务端拒绝」的隔离状态，允许再推一次。
     delete record._rejected;
 
     const db = await openDB();
@@ -138,7 +134,6 @@ export async function getNote(id) {
     return row && !row._deleted ? row : null;
 }
 
-// 单条删除：读一次拿 baseSeq，再走批量路径（两条记录以内，仍是一次事务的量级）。
 export async function deleteNoteLocal(id) {
     const record = await getNote(id);
     return deleteNotesLocal([{ id, baseSeq: record?._baseSeq }]);
@@ -153,8 +148,6 @@ export async function clearDeletions(ids) {
     const drop = new Set(ids || []);
     if (!drop.size) return;
 
-    // 读和写必须在同一个事务里：否则中间如果有新的删除入队，会被这里的
-    // 旧快照覆盖掉，那条删除就永远推不上去了。
     const db = await openDB();
 
     return new Promise((resolve, reject) => {
@@ -193,9 +186,6 @@ export async function pendingChanges(limit = 0) {
         ? store.index('_dirty').getAll(1, limit)
         : store.index('_dirty').getAll(1))) || [];
 
-    // 未删除的改动走 notes，删除走独立队列（主表里已经没有墓碑了）。
-    // _rejected 是被服务端逐条拒绝的毒丸（超长正文、字段非法等），
-    // 继续重推只会每轮空转，等用户编辑后 putNote 会解除标记。
     const notes = rows.filter((r) => !r._deleted && !r._rejected);
     let deletions = await pendingDeletions();
 
@@ -225,9 +215,6 @@ export async function markNotesSynced(notes, seqById) {
                 const current = req.result;
                 if (!current) return;
 
-                // 推送期间用户又改了这条笔记：库里的版本已经比发出去的快照新，
-                // 此时绝不能写成 _dirty:0，否则这次修改永远不会上传；
-                // 也不能用旧快照覆盖正文。只推进 baseSeq，留 dirty 给下一轮。
                 const untouched = current.updatedAt === note.updatedAt
                     && current.title === note.title
                     && current.content === note.content;
@@ -261,7 +248,6 @@ export async function resetForFullResync() {
         req.onsuccess = () => {
             const cursor = req.result;
             if (!cursor) return;
-            // _rejected 的笔记服务端根本没有，正文只存在本地：清掉就永久丢了。
             if (!cursor.value._dirty && !cursor.value._rejected) cursor.delete();
             cursor.continue();
         };
@@ -272,8 +258,6 @@ export async function resetForFullResync() {
 
 export async function applyRemoteBatch(notes, deletedIds = []) {
     const db = await openDB();
-    // 本地已删、但还没推给服务端的条目：服务端此时仍会把它发下来，
-    // 必须跳过，否则删掉的笔记会「复活」。
     const queuedForDelete = new Set((await pendingDeletions()).map((item) => item.id));
 
     return new Promise((resolve, reject) => {
@@ -355,8 +339,6 @@ export function paginate(rows, page, size) {
     };
 }
 
-// 批量本地删除：物理删主表 + 逐条入删除队列，一个事务完成。
-// 用于删除分类/子分类这种一次带走多条笔记的场景。
 export async function deleteNotesLocal(items) {
     const targets = (items || []).filter((item) => item && item.id);
     if (!targets.length) return 0;
@@ -384,8 +366,6 @@ export async function deleteNotesLocal(items) {
             meta.put({ key: PENDING_DELETIONS_KEY, value: list });
         };
 
-        // 删掉的笔记若还在「被拒」清单里，要一并移除，否则状态栏会一直挂着
-        // 「N 条未同步」，而那条笔记早就不存在了。
         const rejectedReq = meta.get(REJECTED_IDS_KEY);
         rejectedReq.onsuccess = () => {
             const ids = Array.isArray(rejectedReq.result?.value) ? rejectedReq.result.value : [];
@@ -401,8 +381,6 @@ export async function deleteNotesLocal(items) {
     });
 }
 
-// 服务端逐条拒绝的笔记：清 dirty（不再重推）并打上标记，
-// 正文完整保留在本地，用户下次编辑会解除标记并重新尝试上传。
 export async function markNotesRejected(items) {
     const list = (items || []).filter((item) => item && item.id);
     if (!list.length) return 0;
@@ -422,8 +400,6 @@ export async function markNotesRejected(items) {
                 const current = req.result;
                 if (!current) return;
 
-                // 推送期间用户又改了：不清 dirty、也不标拒绝，留给下一轮重推新内容。
-                // 否则这次编辑会和 markNotesSynced 的旧逻辑一样被静默丢掉。
                 const untouched = !item.updatedAt
                     || (current.updatedAt === item.updatedAt
                         && current.title === item.title
@@ -497,15 +473,11 @@ export async function pendingCount() {
     return dirty + queued;
 }
 
-// 旧版本把删除记成墓碑（_deleted=1 留在主表里）。升级后把这些记录
-// 迁移到删除队列并物理清掉，避免它们既占空间又被当成「未删」。
 export async function migrateTombstones() {
     if (await readMeta('tombstones_migrated', 0) === 1) return 0;
 
     const db = await openDB();
 
-    // 读队列、合并墓碑、删主表、写标记必须在同一个事务里：
-    // 分开写的话，中途崩溃会留下「队列已写、墓碑还在」的半成品状态。
     return new Promise((resolve, reject) => {
         const tx = db.transaction([STORE_NOTES, STORE_META], 'readwrite');
         const notes = tx.objectStore(STORE_NOTES);
@@ -538,7 +510,6 @@ export async function migrateTombstones() {
                         return;
                     }
 
-                    // 遍历结束：队列与标记和上面的删除同属一个事务
                     meta.put({ key: PENDING_DELETIONS_KEY, value: queue });
                     meta.put({ key: 'tombstones_migrated', value: 1 });
                 };
@@ -548,6 +519,57 @@ export async function migrateTombstones() {
         tx.oncomplete = () => {
             if (migrated) bumpNotesRevision();
             resolve(migrated);
+        };
+        tx.onerror = () => reject(tx.error);
+        tx.onabort = () => reject(tx.error);
+    });
+}
+
+export async function migrateNonUuidIds() {
+    const db = await openDB();
+
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction([STORE_NOTES, STORE_META], 'readwrite');
+        const notes = tx.objectStore(STORE_NOTES);
+        const meta = tx.objectStore(STORE_META);
+        const renamedOld = [];
+        let renamed = 0;
+
+        const finish = () => {
+            if (!renamedOld.length) return;
+
+            const req = meta.get(REJECTED_IDS_KEY);
+            req.onsuccess = () => {
+                const ids = Array.isArray(req.result?.value) ? req.result.value : [];
+                const drop = new Set(renamedOld);
+                const next = ids.filter((id) => !drop.has(id));
+                if (next.length !== ids.length) meta.put({ key: REJECTED_IDS_KEY, value: next });
+            };
+        };
+
+        const cursorReq = notes.openCursor();
+        cursorReq.onsuccess = () => {
+            const cursor = cursorReq.result;
+            if (!cursor) {
+                finish();
+                return;
+            }
+
+            const row = cursor.value;
+            if (row && !row._deleted && !isUuid(row.id)) {
+                const next = { ...row, id: newId(), _dirty: 1, _baseSeq: 0 };
+                delete next._rejected;
+                renamedOld.push(row.id);
+                cursor.delete();
+                notes.put(next);
+                renamed += 1;
+            }
+            cursor.continue();
+        };
+
+        tx.oncomplete = () => {
+            if (renamed) bumpNotesRevision();
+            resolve(renamed);
         };
         tx.onerror = () => reject(tx.error);
         tx.onabort = () => reject(tx.error);

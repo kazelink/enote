@@ -109,4 +109,3 @@ export async function swalUnsaved(saveCallback) {
         return window.confirm('Discard changes? OK=Discard, Cancel=Stay');
     }
 }
-

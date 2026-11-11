@@ -51,4 +51,3 @@ app.route('/api/sync', syncRouter);
 app.all('*', (c) => c.json({ error: 'Not Found' }, 404));
 
 export default app;
-

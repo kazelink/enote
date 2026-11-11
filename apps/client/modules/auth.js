@@ -1,4 +1,4 @@
-import { Utils, RI_SVGS, escapeHtml } from './dom.js';
+import { Utils, LOADER_SVG, escapeHtml } from './dom.js';
 import { UI } from './ui.js';
 import { API, Nonce, Token } from './api.js';
 
@@ -23,7 +23,7 @@ export const Auth = {
 
             busy = true;
             const origHtml = btn ? btn.innerHTML : '';
-            if (btn) btn.innerHTML = RI_SVGS.loader;
+            if (btn) btn.innerHTML = LOADER_SVG;
             if (msg) msg.innerHTML = '';
 
             try {

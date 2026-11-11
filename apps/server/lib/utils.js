@@ -149,4 +149,3 @@ export function toBackupFolder(row) {
         updatedAt: row.updated_at
     };
 }
-

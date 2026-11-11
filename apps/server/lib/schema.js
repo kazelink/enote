@@ -413,4 +413,3 @@ export async function ensureSchema() {
 
   return schemaReadyPromise;
 }
-

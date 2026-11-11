@@ -28,8 +28,6 @@ export async function cookieOnlyAuth(c, next) {
 
     const url = new URL(c.req.url);
     const queryToken = url.searchParams.get('t');
-    // 桌面/移动壳里页面域是 tauri://localhost，向远端取媒体属于跨域，
-    // SameSite=Lax 的 Cookie 带不上，所以要接受请求头里的 token。
     const headerToken = c.req.header('X-Auth-Token');
     const token = getCookie(c, 'enote_auth') || headerToken || queryToken;
 
@@ -39,4 +37,3 @@ export async function cookieOnlyAuth(c, next) {
 
     await next();
 }
-

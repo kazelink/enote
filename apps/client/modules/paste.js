@@ -254,4 +254,3 @@ export function sanitizePastedHtml(html) {
     Array.from(doc.body.childNodes).forEach(sanitizeNode);
     return doc.body.innerHTML.trim();
 }
-
